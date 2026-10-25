@@ -1,0 +1,4 @@
+# El wrapper de Gradle se ejecuta en Linux (Docker): siempre con fin de linea LF.
+gradlew text eol=lf
+*.bat text eol=crlf
+*.jar binary

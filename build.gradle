@@ -1,0 +1,83 @@
+plugins {
+	id 'java'
+	id 'org.springframework.boot' version '4.1.1'
+	id 'io.spring.dependency-management' version '1.1.7'
+}
+
+group = 'co.ecomers'
+version = '0.1.0'
+
+java {
+	toolchain {
+		languageVersion = JavaLanguageVersion.of(21)
+	}
+}
+
+repositories {
+	mavenCentral()
+}
+
+// ojdbc 23.26.3 (el que trae Boot 4.1.1) es rechazado por Oracle XE 21c con ORA-12564
+// "TNS: conexion rechazada"; 23.26.2 conecta bien. Revisar al subir de version.
+ext['oracle-database.version'] = '23.26.2.0.0'
+
+dependencies {
+	// Presentacion
+	implementation 'org.springframework.boot:spring-boot-starter-webmvc'
+	implementation 'org.springframework.boot:spring-boot-starter-validation'
+	implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:3.1.1'
+
+	// Seguridad: login propio. El starter de resource server trae Nimbus (firma y valida los JWT HS256);
+	// BCrypt viene con spring-security-crypto.
+	implementation 'org.springframework.boot:spring-boot-starter-security'
+	implementation 'org.springframework.boot:spring-boot-starter-security-oauth2-resource-server'
+
+	// Persistencia: Spring JDBC contra los paquetes PL/SQL (sin JPA)
+	implementation 'org.springframework.boot:spring-boot-starter-jdbc'
+	implementation 'com.oracle.database.jdbc:ojdbc11'
+
+	// Transversal
+	implementation 'org.springframework.boot:spring-boot-starter-actuator'
+	implementation 'org.springframework.boot:spring-boot-starter-cache'
+	implementation 'com.github.ben-manes.caffeine:caffeine'
+
+	// Integraciones: correo
+	implementation 'org.springframework.boot:spring-boot-starter-mail'
+	implementation 'org.springframework.boot:spring-boot-starter-thymeleaf'
+
+	testImplementation 'org.springframework.boot:spring-boot-starter-webmvc-test'
+	testImplementation 'org.springframework.boot:spring-boot-starter-security-test'
+	testImplementation 'com.tngtech.archunit:archunit-junit5:1.5.1'
+	testImplementation 'com.icegreen:greenmail-junit5:2.1.14'
+	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+// Solo el jar ejecutable (bootJar): asi la imagen Docker copia un unico archivo.
+tasks.named('jar') {
+	enabled = false
+}
+
+tasks.withType(JavaCompile).configureEach {
+	options.encoding = 'UTF-8'
+	options.compilerArgs << '-parameters'
+}
+
+// Pruebas rapidas: no necesitan Oracle ni Keycloak.
+tasks.named('test') {
+	useJUnitPlatform {
+		excludeTags 'oracle'
+	}
+}
+
+// Pruebas contra el Oracle local (usan secrets.properties). Solo leen o llaman a los
+// paquetes con IDs inexistentes: NO modifican datos.
+tasks.register('integrationTest', Test) {
+	description = 'Pruebas de integracion contra el Oracle local (no modifican datos).'
+	group = 'verification'
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	useJUnitPlatform {
+		includeTags 'oracle'
+	}
+	shouldRunAfter tasks.named('test')
+}

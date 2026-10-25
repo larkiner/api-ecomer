@@ -1,0 +1,1368 @@
+-- ============================================================================
+-- 05_datos_divipola.sql
+-- Seccion 2 del diseno (datos): departamentos y municipios de Colombia
+-- (DIVIPOLA del DANE).
+--
+-- Requiere haber ejecutado antes el script 04 (tablas DEPARTAMENTO y MUNICIPIO)
+-- y el 07 (tabla PARAMETRO). Se puede ejecutar en cualquier momento despues de
+-- ellos; no depende de los paquetes.
+--
+-- COMO EJECUTARLO
+--   1. Conectate como ECOMERS al servicio XEPDB1 (SELECT USER FROM dual).
+--   2. Ejecuta como script completo (F5 en SQL Developer). Tarda unos segundos.
+--   3. Esperado: 33 departamentos, 1.122 codigos (1.103 MUNICIPIO,
+--      18 AREA_NO_MUNICIPALIZADA, 1 ISLA) y 0 objetos invalidos.
+--   4. Si las tablas ya tienen datos, el script se detiene sin tocar nada.
+--
+-- FUENTE
+--   DANE, dataset "DIVIPOLA - Codigos municipios" (datos.gov.co, gdxc-w37w),
+--   corte 30-dic-2024. A oct-2026 no hay municipios nuevos codificados despues
+--   de Nuevo Belen de Bajira (27493). La fecha de corte queda guardada en el
+--   parametro DIVIPOLA_CORTE_AAAAMMDD para saber que version esta cargada.
+--
+-- DECISIONES DE DISENO
+--   * Se cargan los 1.122 codigos, no solo los 1.103 municipios: tambien las 18
+--     areas no municipalizadas (Amazonas, Guainia, Vaupes) y la isla de San
+--     Andres (88001). Ahi vive gente que puede comprar, y el DANE y la DIAN usan
+--     esos codigos. La nueva columna TIPO los distingue, por si el backend
+--     necesita mostrar solo municipios.
+--   * Nombres oficiales del DANE, en mayusculas y con tildes: "BOGOTA, D.C.",
+--     "SANTIAGO DE CALI", "SAN JOSE DE CUCUTA". Los cruces con otros sistemas se
+--     hacen SIEMPRE por codigo, nunca por nombre (hay muchos repetidos: ARGELIA,
+--     LA UNION, SANTA BARBARA...).
+--   * Las tildes se escriben con UNISTR (por ejemplo 'MEDELL\00CDN') para que el
+--     archivo sea solo ASCII: asi no se danan al abrirlo o copiarlo con otra
+--     codificacion. En la base quedan como texto normal con tildes.
+--   * Toda la carga es UNA transaccion: si algo falla, ROLLBACK y no queda nada a
+--     medias. Antes del COMMIT se compara la cantidad de codigos de cada
+--     departamento con la que publica el DANE.
+--   * Para actualizar en el futuro (por ejemplo, si se crea San Basilio de
+--     Palenque): un INSERT del codigo nuevo y cambiar el parametro de corte. No
+--     se vuelve a correr este script.
+-- ============================================================================
+
+SET DEFINE OFF
+WHENEVER SQLERROR EXIT SQL.SQLCODE
+
+PROMPT >> 05_datos_divipola.sql: comprobando requisitos
+
+DECLARE
+  v_existentes NUMBER;
+BEGIN
+  IF SYS_CONTEXT('USERENV', 'SESSION_USER') <> 'ECOMERS'
+     OR SYS_CONTEXT('USERENV', 'CON_NAME') <> 'XEPDB1' THEN
+    RAISE_APPLICATION_ERROR(-20001,
+      'Conectate como ECOMERS al servicio XEPDB1 antes de ejecutar este script.');
+  END IF;
+
+  SELECT COUNT(*) INTO v_existentes
+    FROM user_tables
+   WHERE table_name IN ('DEPARTAMENTO', 'MUNICIPIO', 'PARAMETRO');
+  IF v_existentes < 3 THEN
+    RAISE_APPLICATION_ERROR(-20002,
+      'Faltan tablas previas: ejecuta antes los scripts 04 y 07.');
+  END IF;
+
+  SELECT COUNT(*) INTO v_existentes FROM MUNICIPIO;
+  IF v_existentes > 0 THEN
+    RAISE_APPLICATION_ERROR(-20003,
+      'MUNICIPIO ya tiene ' || v_existentes || ' filas: la DIVIPOLA ya estaba cargada. No se toco nada.');
+  END IF;
+
+  SELECT COUNT(*) INTO v_existentes FROM DEPARTAMENTO;
+  IF v_existentes > 0 THEN
+    RAISE_APPLICATION_ERROR(-20003,
+      'DEPARTAMENTO ya tiene ' || v_existentes || ' filas: revisa antes de cargar. No se toco nada.');
+  END IF;
+END;
+/
+
+PROMPT >> agregando la columna MUNICIPIO.TIPO (si no existe)
+
+DECLARE
+  v_existe NUMBER;
+BEGIN
+  SELECT COUNT(*) INTO v_existe
+    FROM user_tab_columns
+   WHERE table_name = 'MUNICIPIO' AND column_name = 'TIPO';
+  IF v_existe = 0 THEN
+    EXECUTE IMMEDIATE
+      'ALTER TABLE MUNICIPIO ADD (TIPO VARCHAR2(25) DEFAULT ''MUNICIPIO'' NOT NULL '
+      || 'CONSTRAINT CK_MUNICIPIO_TIPO CHECK (TIPO IN (''MUNICIPIO'', ''AREA_NO_MUNICIPALIZADA'', ''ISLA'')))';
+    EXECUTE IMMEDIATE
+      'COMMENT ON COLUMN MUNICIPIO.TIPO IS ''Tipo de unidad DIVIPOLA: MUNICIPIO, AREA_NO_MUNICIPALIZADA o ISLA (San Andres).''';
+  END IF;
+END;
+/
+
+-- El ALTER TABLE puede dejar invalidos los objetos que dependen de MUNICIPIO.
+BEGIN
+  DBMS_UTILITY.COMPILE_SCHEMA(schema => USER, compile_all => FALSE);
+END;
+/
+
+PROMPT >> cargando 33 departamentos y 1.122 codigos (una sola transaccion)
+
+DECLARE
+  PROCEDURE d(p_codigo IN VARCHAR2, p_nombre IN VARCHAR2) IS
+  BEGIN
+    INSERT INTO DEPARTAMENTO (CODIGO_DANE, NOMBRE) VALUES (p_codigo, p_nombre);
+  END d;
+
+  PROCEDURE m(p_codigo IN VARCHAR2, p_nombre IN VARCHAR2, p_tipo IN VARCHAR2 DEFAULT 'MUNICIPIO') IS
+  BEGIN
+    INSERT INTO MUNICIPIO (CODIGO_DANE, CODIGO_DEPARTAMENTO, NOMBRE, TIPO)
+    VALUES (p_codigo, SUBSTR(p_codigo, 1, 2), p_nombre, p_tipo);
+  END m;
+
+  -- Compara lo cargado con la cantidad que publica el DANE para el departamento.
+  PROCEDURE esperado(p_departamento IN VARCHAR2, p_cantidad IN NUMBER) IS
+    v_cargados NUMBER;
+  BEGIN
+    SELECT COUNT(*) INTO v_cargados FROM MUNICIPIO WHERE CODIGO_DEPARTAMENTO = p_departamento;
+    IF v_cargados <> p_cantidad THEN
+      RAISE_APPLICATION_ERROR(-20004,
+        'Departamento ' || p_departamento || ': se cargaron ' || v_cargados ||
+        ' codigos y el DANE publica ' || p_cantidad || '. Se deshace la carga.');
+    END IF;
+  END esperado;
+BEGIN
+  -- Departamentos (33)
+  d('05', 'ANTIOQUIA');
+  d('08', UNISTR('ATL\00C1NTICO'));
+  d('11', UNISTR('BOGOT\00C1, D.C.'));
+  d('13', UNISTR('BOL\00CDVAR'));
+  d('15', UNISTR('BOYAC\00C1'));
+  d('17', 'CALDAS');
+  d('18', UNISTR('CAQUET\00C1'));
+  d('19', 'CAUCA');
+  d('20', 'CESAR');
+  d('23', UNISTR('C\00D3RDOBA'));
+  d('25', 'CUNDINAMARCA');
+  d('27', UNISTR('CHOC\00D3'));
+  d('41', 'HUILA');
+  d('44', 'LA GUAJIRA');
+  d('47', 'MAGDALENA');
+  d('50', 'META');
+  d('52', UNISTR('NARI\00D1O'));
+  d('54', 'NORTE DE SANTANDER');
+  d('63', UNISTR('QUIND\00CDO'));
+  d('66', 'RISARALDA');
+  d('68', 'SANTANDER');
+  d('70', 'SUCRE');
+  d('73', 'TOLIMA');
+  d('76', 'VALLE DEL CAUCA');
+  d('81', 'ARAUCA');
+  d('85', 'CASANARE');
+  d('86', 'PUTUMAYO');
+  d('88', UNISTR('ARCHIPI\00C9LAGO DE SAN ANDR\00C9S, PROVIDENCIA Y SANTA CATALINA'));
+  d('91', 'AMAZONAS');
+  d('94', UNISTR('GUAIN\00CDA'));
+  d('95', 'GUAVIARE');
+  d('97', UNISTR('VAUP\00C9S'));
+  d('99', 'VICHADA');
+
+  -- Municipios, areas no municipalizadas e isla (1.122)
+  m('05001', UNISTR('MEDELL\00CDN'));
+  m('05002', 'ABEJORRAL');
+  m('05004', UNISTR('ABRIAQU\00CD'));
+  m('05021', UNISTR('ALEJANDR\00CDA'));
+  m('05030', UNISTR('AMAG\00C1'));
+  m('05031', 'AMALFI');
+  m('05034', 'ANDES');
+  m('05036', UNISTR('ANGEL\00D3POLIS'));
+  m('05038', 'ANGOSTURA');
+  m('05040', UNISTR('ANOR\00CD'));
+  m('05042', UNISTR('SANTA F\00C9 DE ANTIOQUIA'));
+  m('05044', UNISTR('ANZ\00C1'));
+  m('05045', UNISTR('APARTAD\00D3'));
+  m('05051', 'ARBOLETES');
+  m('05055', 'ARGELIA');
+  m('05059', 'ARMENIA');
+  m('05079', 'BARBOSA');
+  m('05086', 'BELMIRA');
+  m('05088', 'BELLO');
+  m('05091', 'BETANIA');
+  m('05093', 'BETULIA');
+  m('05101', UNISTR('CIUDAD BOL\00CDVAR'));
+  m('05107', UNISTR('BRICE\00D1O'));
+  m('05113', UNISTR('BURITIC\00C1'));
+  m('05120', UNISTR('C\00C1CERES'));
+  m('05125', 'CAICEDO');
+  m('05129', 'CALDAS');
+  m('05134', 'CAMPAMENTO');
+  m('05138', UNISTR('CA\00D1ASGORDAS'));
+  m('05142', UNISTR('CARACOL\00CD'));
+  m('05145', 'CARAMANTA');
+  m('05147', 'CAREPA');
+  m('05148', 'EL CARMEN DE VIBORAL');
+  m('05150', 'CAROLINA');
+  m('05154', 'CAUCASIA');
+  m('05172', UNISTR('CHIGOROD\00D3'));
+  m('05190', 'CISNEROS');
+  m('05197', UNISTR('COCORN\00C1'));
+  m('05206', UNISTR('CONCEPCI\00D3N'));
+  m('05209', 'CONCORDIA');
+  m('05212', 'COPACABANA');
+  m('05234', 'DABEIBA');
+  m('05237', UNISTR('DONMAT\00CDAS'));
+  m('05240', UNISTR('EB\00C9JICO'));
+  m('05250', 'EL BAGRE');
+  m('05264', UNISTR('ENTRERR\00CDOS'));
+  m('05266', 'ENVIGADO');
+  m('05282', 'FREDONIA');
+  m('05284', 'FRONTINO');
+  m('05306', 'GIRALDO');
+  m('05308', 'GIRARDOTA');
+  m('05310', UNISTR('G\00D3MEZ PLATA'));
+  m('05313', 'GRANADA');
+  m('05315', 'GUADALUPE');
+  m('05318', 'GUARNE');
+  m('05321', UNISTR('GUATAP\00C9'));
+  m('05347', 'HELICONIA');
+  m('05353', 'HISPANIA');
+  m('05360', UNISTR('ITAG\00DC\00CD'));
+  m('05361', 'ITUANGO');
+  m('05364', UNISTR('JARD\00CDN'));
+  m('05368', UNISTR('JERIC\00D3'));
+  m('05376', 'LA CEJA');
+  m('05380', 'LA ESTRELLA');
+  m('05390', 'LA PINTADA');
+  m('05400', UNISTR('LA UNI\00D3N'));
+  m('05411', 'LIBORINA');
+  m('05425', 'MACEO');
+  m('05440', 'MARINILLA');
+  m('05467', 'MONTEBELLO');
+  m('05475', UNISTR('MURIND\00D3'));
+  m('05480', UNISTR('MUTAT\00C1'));
+  m('05483', UNISTR('NARI\00D1O'));
+  m('05490', UNISTR('NECOCL\00CD'));
+  m('05495', UNISTR('NECH\00CD'));
+  m('05501', 'OLAYA');
+  m('05541', UNISTR('PE\00D1OL'));
+  m('05543', 'PEQUE');
+  m('05576', 'PUEBLORRICO');
+  m('05579', UNISTR('PUERTO BERR\00CDO'));
+  m('05585', 'PUERTO NARE');
+  m('05591', 'PUERTO TRIUNFO');
+  m('05604', 'REMEDIOS');
+  m('05607', 'RETIRO');
+  m('05615', 'RIONEGRO');
+  m('05628', 'SABANALARGA');
+  m('05631', 'SABANETA');
+  m('05642', 'SALGAR');
+  m('05647', UNISTR('SAN ANDR\00C9S DE CUERQU\00CDA'));
+  m('05649', 'SAN CARLOS');
+  m('05652', 'SAN FRANCISCO');
+  m('05656', UNISTR('SAN JER\00D3NIMO'));
+  m('05658', UNISTR('SAN JOS\00C9 DE LA MONTA\00D1A'));
+  m('05659', UNISTR('SAN JUAN DE URAB\00C1'));
+  m('05660', 'SAN LUIS');
+  m('05664', 'SAN PEDRO DE LOS MILAGROS');
+  m('05665', UNISTR('SAN PEDRO DE URAB\00C1'));
+  m('05667', 'SAN RAFAEL');
+  m('05670', 'SAN ROQUE');
+  m('05674', 'SAN VICENTE FERRER');
+  m('05679', UNISTR('SANTA B\00C1RBARA'));
+  m('05686', 'SANTA ROSA DE OSOS');
+  m('05690', 'SANTO DOMINGO');
+  m('05697', 'EL SANTUARIO');
+  m('05736', 'SEGOVIA');
+  m('05756', UNISTR('SONS\00D3N'));
+  m('05761', UNISTR('SOPETR\00C1N'));
+  m('05789', UNISTR('T\00C1MESIS'));
+  m('05790', UNISTR('TARAZ\00C1'));
+  m('05792', 'TARSO');
+  m('05809', UNISTR('TITIRIB\00CD'));
+  m('05819', 'TOLEDO');
+  m('05837', 'TURBO');
+  m('05842', 'URAMITA');
+  m('05847', 'URRAO');
+  m('05854', 'VALDIVIA');
+  m('05856', UNISTR('VALPARA\00CDSO'));
+  m('05858', UNISTR('VEGACH\00CD'));
+  m('05861', 'VENECIA');
+  m('05873', UNISTR('VIG\00CDA DEL FUERTE'));
+  m('05885', UNISTR('YAL\00CD'));
+  m('05887', 'YARUMAL');
+  m('05890', UNISTR('YOLOMB\00D3'));
+  m('05893', UNISTR('YOND\00D3'));
+  m('05895', 'ZARAGOZA');
+  m('08001', 'BARRANQUILLA');
+  m('08078', 'BARANOA');
+  m('08137', 'CAMPO DE LA CRUZ');
+  m('08141', 'CANDELARIA');
+  m('08296', 'GALAPA');
+  m('08372', 'JUAN DE ACOSTA');
+  m('08421', 'LURUACO');
+  m('08433', 'MALAMBO');
+  m('08436', UNISTR('MANAT\00CD'));
+  m('08520', 'PALMAR DE VARELA');
+  m('08549', UNISTR('PIOJ\00D3'));
+  m('08558', 'POLONUEVO');
+  m('08560', 'PONEDERA');
+  m('08573', 'PUERTO COLOMBIA');
+  m('08606', UNISTR('REPEL\00D3N'));
+  m('08634', 'SABANAGRANDE');
+  m('08638', 'SABANALARGA');
+  m('08675', UNISTR('SANTA LUC\00CDA'));
+  m('08685', UNISTR('SANTO TOM\00C1S'));
+  m('08758', 'SOLEDAD');
+  m('08770', 'SUAN');
+  m('08832', UNISTR('TUBAR\00C1'));
+  m('08849', UNISTR('USIACUR\00CD'));
+  m('11001', UNISTR('BOGOT\00C1, D.C.'));
+  m('13001', 'CARTAGENA DE INDIAS');
+  m('13006', UNISTR('ACH\00CD'));
+  m('13030', 'ALTOS DEL ROSARIO');
+  m('13042', 'ARENAL');
+  m('13052', 'ARJONA');
+  m('13062', 'ARROYOHONDO');
+  m('13074', 'BARRANCO DE LOBA');
+  m('13140', 'CALAMAR');
+  m('13160', 'CANTAGALLO');
+  m('13188', 'CICUCO');
+  m('13212', UNISTR('C\00D3RDOBA'));
+  m('13222', 'CLEMENCIA');
+  m('13244', UNISTR('EL CARMEN DE BOL\00CDVAR'));
+  m('13248', 'EL GUAMO');
+  m('13268', UNISTR('EL PE\00D1\00D3N'));
+  m('13300', 'HATILLO DE LOBA');
+  m('13430', UNISTR('MAGANGU\00C9'));
+  m('13433', 'MAHATES');
+  m('13440', 'MARGARITA');
+  m('13442', UNISTR('MAR\00CDA LA BAJA'));
+  m('13458', 'MONTECRISTO');
+  m('13468', 'SANTA CRUZ DE MOMPOX');
+  m('13473', 'MORALES');
+  m('13490', UNISTR('NOROS\00CD'));
+  m('13549', 'PINILLOS');
+  m('13580', 'REGIDOR');
+  m('13600', UNISTR('R\00CDO VIEJO'));
+  m('13620', UNISTR('SAN CRIST\00D3BAL'));
+  m('13647', 'SAN ESTANISLAO');
+  m('13650', 'SAN FERNANDO');
+  m('13654', 'SAN JACINTO');
+  m('13655', 'SAN JACINTO DEL CAUCA');
+  m('13657', 'SAN JUAN NEPOMUCENO');
+  m('13667', UNISTR('SAN MART\00CDN DE LOBA'));
+  m('13670', 'SAN PABLO');
+  m('13673', 'SANTA CATALINA');
+  m('13683', 'SANTA ROSA');
+  m('13688', 'SANTA ROSA DEL SUR');
+  m('13744', UNISTR('SIMIT\00CD'));
+  m('13760', 'SOPLAVIENTO');
+  m('13780', 'TALAIGUA NUEVO');
+  m('13810', 'TIQUISIO');
+  m('13836', 'TURBACO');
+  m('13838', UNISTR('TURBAN\00C1'));
+  m('13873', 'VILLANUEVA');
+  m('13894', 'ZAMBRANO');
+  m('15001', 'TUNJA');
+  m('15022', 'ALMEIDA');
+  m('15047', 'AQUITANIA');
+  m('15051', 'ARCABUCO');
+  m('15087', UNISTR('BEL\00C9N'));
+  m('15090', 'BERBEO');
+  m('15092', UNISTR('BET\00C9ITIVA'));
+  m('15097', 'BOAVITA');
+  m('15104', UNISTR('BOYAC\00C1'));
+  m('15106', UNISTR('BRICE\00D1O'));
+  m('15109', 'BUENAVISTA');
+  m('15114', UNISTR('BUSBANZ\00C1'));
+  m('15131', 'CALDAS');
+  m('15135', 'CAMPOHERMOSO');
+  m('15162', 'CERINZA');
+  m('15172', 'CHINAVITA');
+  m('15176', UNISTR('CHIQUINQUIR\00C1'));
+  m('15180', 'CHISCAS');
+  m('15183', 'CHITA');
+  m('15185', 'CHITARAQUE');
+  m('15187', UNISTR('CHIVAT\00C1'));
+  m('15189', UNISTR('CI\00C9NEGA'));
+  m('15204', UNISTR('C\00D3MBITA'));
+  m('15212', 'COPER');
+  m('15215', 'CORRALES');
+  m('15218', UNISTR('COVARACH\00CDA'));
+  m('15223', UNISTR('CUBAR\00C1'));
+  m('15224', 'CUCAITA');
+  m('15226', UNISTR('CU\00CDTIVA'));
+  m('15232', UNISTR('CH\00CDQUIZA'));
+  m('15236', 'CHIVOR');
+  m('15238', 'DUITAMA');
+  m('15244', 'EL COCUY');
+  m('15248', 'EL ESPINO');
+  m('15272', 'FIRAVITOBA');
+  m('15276', 'FLORESTA');
+  m('15293', UNISTR('GACHANTIV\00C1'));
+  m('15296', UNISTR('G\00C1MEZA'));
+  m('15299', 'GARAGOA');
+  m('15317', 'GUACAMAYAS');
+  m('15322', 'GUATEQUE');
+  m('15325', UNISTR('GUAYAT\00C1'));
+  m('15332', UNISTR('G\00DCIC\00C1N DE LA SIERRA'));
+  m('15362', 'IZA');
+  m('15367', 'JENESANO');
+  m('15368', UNISTR('JERIC\00D3'));
+  m('15377', 'LABRANZAGRANDE');
+  m('15380', 'LA CAPILLA');
+  m('15401', 'LA VICTORIA');
+  m('15403', 'LA UVITA');
+  m('15407', 'VILLA DE LEYVA');
+  m('15425', 'MACANAL');
+  m('15442', UNISTR('MARIP\00CD'));
+  m('15455', 'MIRAFLORES');
+  m('15464', 'MONGUA');
+  m('15466', UNISTR('MONGU\00CD'));
+  m('15469', UNISTR('MONIQUIR\00C1'));
+  m('15476', 'MOTAVITA');
+  m('15480', 'MUZO');
+  m('15491', 'NOBSA');
+  m('15494', UNISTR('NUEVO COL\00D3N'));
+  m('15500', UNISTR('OICAT\00C1'));
+  m('15507', 'OTANCHE');
+  m('15511', 'PACHAVITA');
+  m('15514', UNISTR('P\00C1EZ'));
+  m('15516', 'PAIPA');
+  m('15518', 'PAJARITO');
+  m('15522', 'PANQUEBA');
+  m('15531', 'PAUNA');
+  m('15533', 'PAYA');
+  m('15537', UNISTR('PAZ DE R\00CDO'));
+  m('15542', 'PESCA');
+  m('15550', 'PISBA');
+  m('15572', UNISTR('PUERTO BOYAC\00C1'));
+  m('15580', UNISTR('QU\00CDPAMA'));
+  m('15599', UNISTR('RAMIRIQU\00CD'));
+  m('15600', UNISTR('R\00C1QUIRA'));
+  m('15621', UNISTR('ROND\00D3N'));
+  m('15632', UNISTR('SABOY\00C1'));
+  m('15638', UNISTR('S\00C1CHICA'));
+  m('15646', UNISTR('SAMAC\00C1'));
+  m('15660', 'SAN EDUARDO');
+  m('15664', UNISTR('SAN JOS\00C9 DE PARE'));
+  m('15667', 'SAN LUIS DE GACENO');
+  m('15673', 'SAN MATEO');
+  m('15676', 'SAN MIGUEL DE SEMA');
+  m('15681', 'SAN PABLO DE BORBUR');
+  m('15686', 'SANTANA');
+  m('15690', UNISTR('SANTA MAR\00CDA'));
+  m('15693', 'SANTA ROSA DE VITERBO');
+  m('15696', UNISTR('SANTA SOF\00CDA'));
+  m('15720', 'SATIVANORTE');
+  m('15723', 'SATIVASUR');
+  m('15740', 'SIACHOQUE');
+  m('15753', UNISTR('SOAT\00C1'));
+  m('15755', UNISTR('SOCOT\00C1'));
+  m('15757', 'SOCHA');
+  m('15759', 'SOGAMOSO');
+  m('15761', 'SOMONDOCO');
+  m('15762', 'SORA');
+  m('15763', UNISTR('SOTAQUIR\00C1'));
+  m('15764', UNISTR('SORAC\00C1'));
+  m('15774', UNISTR('SUSAC\00D3N'));
+  m('15776', UNISTR('SUTAMARCH\00C1N'));
+  m('15778', 'SUTATENZA');
+  m('15790', 'TASCO');
+  m('15798', 'TENZA');
+  m('15804', UNISTR('TIBAN\00C1'));
+  m('15806', 'TIBASOSA');
+  m('15808', UNISTR('TINJAC\00C1'));
+  m('15810', 'TIPACOQUE');
+  m('15814', 'TOCA');
+  m('15816', UNISTR('TOG\00DC\00CD'));
+  m('15820', UNISTR('T\00D3PAGA'));
+  m('15822', 'TOTA');
+  m('15832', UNISTR('TUNUNGU\00C1'));
+  m('15835', UNISTR('TURMEQU\00C9'));
+  m('15837', 'TUTA');
+  m('15839', UNISTR('TUTAZ\00C1'));
+  m('15842', UNISTR('\00DAMBITA'));
+  m('15861', 'VENTAQUEMADA');
+  m('15879', UNISTR('VIRACACH\00C1'));
+  m('15897', 'ZETAQUIRA');
+  m('17001', 'MANIZALES');
+  m('17013', 'AGUADAS');
+  m('17042', 'ANSERMA');
+  m('17050', 'ARANZAZU');
+  m('17088', UNISTR('BELALC\00C1ZAR'));
+  m('17174', UNISTR('CHINCHIN\00C1'));
+  m('17272', 'FILADELFIA');
+  m('17380', 'LA DORADA');
+  m('17388', 'LA MERCED');
+  m('17433', 'MANZANARES');
+  m('17442', 'MARMATO');
+  m('17444', 'MARQUETALIA');
+  m('17446', 'MARULANDA');
+  m('17486', 'NEIRA');
+  m('17495', 'NORCASIA');
+  m('17513', UNISTR('P\00C1CORA'));
+  m('17524', 'PALESTINA');
+  m('17541', 'PENSILVANIA');
+  m('17614', 'RIOSUCIO');
+  m('17616', 'RISARALDA');
+  m('17653', 'SALAMINA');
+  m('17662', UNISTR('SAMAN\00C1'));
+  m('17665', UNISTR('SAN JOS\00C9'));
+  m('17777', UNISTR('SUP\00CDA'));
+  m('17867', 'VICTORIA');
+  m('17873', UNISTR('VILLAMAR\00CDA'));
+  m('17877', 'VITERBO');
+  m('18001', 'FLORENCIA');
+  m('18029', 'ALBANIA');
+  m('18094', UNISTR('BEL\00C9N DE LOS ANDAQU\00CDES'));
+  m('18150', UNISTR('CARTAGENA DEL CHAIR\00C1'));
+  m('18205', 'CURILLO');
+  m('18247', 'EL DONCELLO');
+  m('18256', UNISTR('EL PAUJ\00CDL'));
+  m('18410', UNISTR('LA MONTA\00D1ITA'));
+  m('18460', UNISTR('MIL\00C1N'));
+  m('18479', 'MORELIA');
+  m('18592', 'PUERTO RICO');
+  m('18610', UNISTR('SAN JOS\00C9 DEL FRAGUA'));
+  m('18753', UNISTR('SAN VICENTE DEL CAGU\00C1N'));
+  m('18756', 'SOLANO');
+  m('18785', 'SOLITA');
+  m('18860', UNISTR('VALPARA\00CDSO'));
+  m('19001', UNISTR('POPAY\00C1N'));
+  m('19022', 'ALMAGUER');
+  m('19050', 'ARGELIA');
+  m('19075', 'BALBOA');
+  m('19100', UNISTR('BOL\00CDVAR'));
+  m('19110', 'BUENOS AIRES');
+  m('19130', UNISTR('CAJIB\00CDO'));
+  m('19137', 'CALDONO');
+  m('19142', 'CALOTO');
+  m('19212', 'CORINTO');
+  m('19256', 'EL TAMBO');
+  m('19290', 'FLORENCIA');
+  m('19300', UNISTR('GUACHEN\00C9'));
+  m('19318', 'GUAPI');
+  m('19355', UNISTR('INZ\00C1'));
+  m('19364', UNISTR('JAMBAL\00D3'));
+  m('19392', 'LA SIERRA');
+  m('19397', 'LA VEGA');
+  m('19418', UNISTR('L\00D3PEZ DE MICAY'));
+  m('19450', 'MERCADERES');
+  m('19455', 'MIRANDA');
+  m('19473', 'MORALES');
+  m('19513', 'PADILLA');
+  m('19517', UNISTR('P\00C1EZ'));
+  m('19532', UNISTR('PAT\00CDA'));
+  m('19533', 'PIAMONTE');
+  m('19548', UNISTR('PIENDAM\00D3 - TUN\00CDA'));
+  m('19573', 'PUERTO TEJADA');
+  m('19585', UNISTR('PURAC\00C9'));
+  m('19622', 'ROSAS');
+  m('19693', UNISTR('SAN SEBASTI\00C1N'));
+  m('19698', 'SANTANDER DE QUILICHAO');
+  m('19701', 'SANTA ROSA');
+  m('19743', 'SILVIA');
+  m('19760', UNISTR('SOTAR\00C1 - PAISPAMBA'));
+  m('19780', UNISTR('SU\00C1REZ'));
+  m('19785', 'SUCRE');
+  m('19807', UNISTR('TIMB\00CDO'));
+  m('19809', UNISTR('TIMBIQU\00CD'));
+  m('19821', UNISTR('TORIB\00CDO'));
+  m('19824', UNISTR('TOTOR\00D3'));
+  m('19845', 'VILLA RICA');
+  m('20001', 'VALLEDUPAR');
+  m('20011', 'AGUACHICA');
+  m('20013', UNISTR('AGUST\00CDN CODAZZI'));
+  m('20032', 'ASTREA');
+  m('20045', 'BECERRIL');
+  m('20060', 'BOSCONIA');
+  m('20175', 'CHIMICHAGUA');
+  m('20178', UNISTR('CHIRIGUAN\00C1'));
+  m('20228', UNISTR('CURUMAN\00CD'));
+  m('20238', 'EL COPEY');
+  m('20250', 'EL PASO');
+  m('20295', 'GAMARRA');
+  m('20310', UNISTR('GONZ\00C1LEZ'));
+  m('20383', 'LA GLORIA');
+  m('20400', 'LA JAGUA DE IBIRICO');
+  m('20443', UNISTR('MANAURE BALC\00D3N DEL CESAR'));
+  m('20517', 'PAILITAS');
+  m('20550', 'PELAYA');
+  m('20570', 'PUEBLO BELLO');
+  m('20614', UNISTR('R\00CDO DE ORO'));
+  m('20621', 'LA PAZ');
+  m('20710', 'SAN ALBERTO');
+  m('20750', 'SAN DIEGO');
+  m('20770', UNISTR('SAN MART\00CDN'));
+  m('20787', 'TAMALAMEQUE');
+  m('23001', UNISTR('MONTER\00CDA'));
+  m('23068', 'AYAPEL');
+  m('23079', 'BUENAVISTA');
+  m('23090', 'CANALETE');
+  m('23162', UNISTR('CERET\00C9'));
+  m('23168', UNISTR('CHIM\00C1'));
+  m('23182', UNISTR('CHIN\00DA'));
+  m('23189', UNISTR('CI\00C9NAGA DE ORO'));
+  m('23300', 'COTORRA');
+  m('23350', 'LA APARTADA');
+  m('23417', 'LORICA');
+  m('23419', UNISTR('LOS C\00D3RDOBAS'));
+  m('23464', 'MOMIL');
+  m('23466', UNISTR('MONTEL\00CDBANO'));
+  m('23500', UNISTR('MO\00D1ITOS'));
+  m('23555', 'PLANETA RICA');
+  m('23570', 'PUEBLO NUEVO');
+  m('23574', 'PUERTO ESCONDIDO');
+  m('23580', 'PUERTO LIBERTADOR');
+  m('23586', UNISTR('PUR\00CDSIMA DE LA CONCEPCI\00D3N'));
+  m('23660', UNISTR('SAHAG\00DAN'));
+  m('23670', UNISTR('SAN ANDR\00C9S DE SOTAVENTO'));
+  m('23672', 'SAN ANTERO');
+  m('23675', 'SAN BERNARDO DEL VIENTO');
+  m('23678', 'SAN CARLOS');
+  m('23682', UNISTR('SAN JOS\00C9 DE UR\00C9'));
+  m('23686', 'SAN PELAYO');
+  m('23807', 'TIERRALTA');
+  m('23815', UNISTR('TUCH\00CDN'));
+  m('23855', 'VALENCIA');
+  m('25001', 'AGUA DE DIOS');
+  m('25019', UNISTR('ALB\00C1N'));
+  m('25035', 'ANAPOIMA');
+  m('25040', 'ANOLAIMA');
+  m('25053', UNISTR('ARBEL\00C1EZ'));
+  m('25086', UNISTR('BELTR\00C1N'));
+  m('25095', 'BITUIMA');
+  m('25099', UNISTR('BOJAC\00C1'));
+  m('25120', 'CABRERA');
+  m('25123', 'CACHIPAY');
+  m('25126', UNISTR('CAJIC\00C1'));
+  m('25148', UNISTR('CAPARRAP\00CD'));
+  m('25151', UNISTR('C\00C1QUEZA'));
+  m('25154', 'CARMEN DE CARUPA');
+  m('25168', UNISTR('CHAGUAN\00CD'));
+  m('25175', UNISTR('CH\00CDA'));
+  m('25178', 'CHIPAQUE');
+  m('25181', UNISTR('CHOACH\00CD'));
+  m('25183', UNISTR('CHOCONT\00C1'));
+  m('25200', 'COGUA');
+  m('25214', 'COTA');
+  m('25224', UNISTR('CUCUNUB\00C1'));
+  m('25245', 'EL COLEGIO');
+  m('25258', UNISTR('EL PE\00D1\00D3N'));
+  m('25260', 'EL ROSAL');
+  m('25269', UNISTR('FACATATIV\00C1'));
+  m('25279', UNISTR('F\00D3MEQUE'));
+  m('25281', 'FOSCA');
+  m('25286', 'FUNZA');
+  m('25288', UNISTR('F\00DAQUENE'));
+  m('25290', UNISTR('FUSAGASUG\00C1'));
+  m('25293', UNISTR('GACHAL\00C1'));
+  m('25295', UNISTR('GACHANCIP\00C1'));
+  m('25297', UNISTR('GACHET\00C1'));
+  m('25299', 'GAMA');
+  m('25307', 'GIRARDOT');
+  m('25312', 'GRANADA');
+  m('25317', UNISTR('GUACHET\00C1'));
+  m('25320', 'GUADUAS');
+  m('25322', 'GUASCA');
+  m('25324', UNISTR('GUATAQU\00CD'));
+  m('25326', 'GUATAVITA');
+  m('25328', UNISTR('GUAYABAL DE S\00CDQUIMA'));
+  m('25335', 'GUAYABETAL');
+  m('25339', UNISTR('GUTI\00C9RREZ'));
+  m('25368', UNISTR('JERUSAL\00C9N'));
+  m('25372', UNISTR('JUN\00CDN'));
+  m('25377', 'LA CALERA');
+  m('25386', 'LA MESA');
+  m('25394', 'LA PALMA');
+  m('25398', UNISTR('LA PE\00D1A'));
+  m('25402', 'LA VEGA');
+  m('25407', 'LENGUAZAQUE');
+  m('25426', UNISTR('MACHET\00C1'));
+  m('25430', 'MADRID');
+  m('25436', 'MANTA');
+  m('25438', 'MEDINA');
+  m('25473', 'MOSQUERA');
+  m('25483', UNISTR('NARI\00D1O'));
+  m('25486', UNISTR('NEMOC\00D3N'));
+  m('25488', 'NILO');
+  m('25489', 'NIMAIMA');
+  m('25491', 'NOCAIMA');
+  m('25506', 'VENECIA');
+  m('25513', 'PACHO');
+  m('25518', 'PAIME');
+  m('25524', 'PANDI');
+  m('25530', 'PARATEBUENO');
+  m('25535', 'PASCA');
+  m('25572', 'PUERTO SALGAR');
+  m('25580', UNISTR('PUL\00CD'));
+  m('25592', 'QUEBRADANEGRA');
+  m('25594', 'QUETAME');
+  m('25596', 'QUIPILE');
+  m('25599', 'APULO');
+  m('25612', 'RICAURTE');
+  m('25645', 'SAN ANTONIO DEL TEQUENDAMA');
+  m('25649', 'SAN BERNARDO');
+  m('25653', 'SAN CAYETANO');
+  m('25658', 'SAN FRANCISCO');
+  m('25662', 'SAN JUAN DE RIOSECO');
+  m('25718', 'SASAIMA');
+  m('25736', UNISTR('SESQUIL\00C9'));
+  m('25740', UNISTR('SIBAT\00C9'));
+  m('25743', 'SILVANIA');
+  m('25745', 'SIMIJACA');
+  m('25754', 'SOACHA');
+  m('25758', UNISTR('SOP\00D3'));
+  m('25769', 'SUBACHOQUE');
+  m('25772', 'SUESCA');
+  m('25777', UNISTR('SUPAT\00C1'));
+  m('25779', 'SUSA');
+  m('25781', 'SUTATAUSA');
+  m('25785', 'TABIO');
+  m('25793', 'TAUSA');
+  m('25797', 'TENA');
+  m('25799', 'TENJO');
+  m('25805', 'TIBACUY');
+  m('25807', 'TIBIRITA');
+  m('25815', 'TOCAIMA');
+  m('25817', UNISTR('TOCANCIP\00C1'));
+  m('25823', UNISTR('TOPAIP\00CD'));
+  m('25839', UNISTR('UBAL\00C1'));
+  m('25841', 'UBAQUE');
+  m('25843', UNISTR('VILLA DE SAN DIEGO DE UBAT\00C9'));
+  m('25845', 'UNE');
+  m('25851', UNISTR('\00DATICA'));
+  m('25862', 'VERGARA');
+  m('25867', UNISTR('VIAN\00CD'));
+  m('25871', UNISTR('VILLAG\00D3MEZ'));
+  m('25873', UNISTR('VILLAPINZ\00D3N'));
+  m('25875', 'VILLETA');
+  m('25878', UNISTR('VIOT\00C1'));
+  m('25885', UNISTR('YACOP\00CD'));
+  m('25898', UNISTR('ZIPAC\00D3N'));
+  m('25899', UNISTR('ZIPAQUIR\00C1'));
+  m('27001', UNISTR('QUIBD\00D3'));
+  m('27006', UNISTR('ACAND\00CD'));
+  m('27025', UNISTR('ALTO BAUD\00D3'));
+  m('27050', 'ATRATO');
+  m('27073', UNISTR('BAGAD\00D3'));
+  m('27075', UNISTR('BAH\00CDA SOLANO'));
+  m('27077', UNISTR('BAJO BAUD\00D3'));
+  m('27099', UNISTR('BOJAY\00C1'));
+  m('27135', UNISTR('EL CANT\00D3N DEL SAN PABLO'));
+  m('27150', UNISTR('CARMEN DEL DARI\00C9N'));
+  m('27160', UNISTR('C\00C9RTEGUI'));
+  m('27205', 'CONDOTO');
+  m('27245', 'EL CARMEN DE ATRATO');
+  m('27250', 'EL LITORAL DEL SAN JUAN');
+  m('27361', 'ISTMINA');
+  m('27372', UNISTR('JURAD\00D3'));
+  m('27413', UNISTR('LLOR\00D3'));
+  m('27425', 'MEDIO ATRATO');
+  m('27430', UNISTR('MEDIO BAUD\00D3'));
+  m('27450', 'MEDIO SAN JUAN');
+  m('27491', UNISTR('N\00D3VITA'));
+  m('27493', UNISTR('NUEVO BEL\00C9N DE BAJIR\00C1'));
+  m('27495', UNISTR('NUQU\00CD'));
+  m('27580', UNISTR('R\00CDO IR\00D3'));
+  m('27600', UNISTR('R\00CDO QUITO'));
+  m('27615', 'RIOSUCIO');
+  m('27660', UNISTR('SAN JOS\00C9 DEL PALMAR'));
+  m('27745', UNISTR('SIP\00CD'));
+  m('27787', UNISTR('TAD\00D3'));
+  m('27800', UNISTR('UNGU\00CDA'));
+  m('27810', UNISTR('UNI\00D3N PANAMERICANA'));
+  m('41001', 'NEIVA');
+  m('41006', 'ACEVEDO');
+  m('41013', 'AGRADO');
+  m('41016', 'AIPE');
+  m('41020', 'ALGECIRAS');
+  m('41026', 'ALTAMIRA');
+  m('41078', 'BARAYA');
+  m('41132', 'CAMPOALEGRE');
+  m('41206', 'COLOMBIA');
+  m('41244', UNISTR('EL\00CDAS'));
+  m('41298', UNISTR('GARZ\00D3N'));
+  m('41306', 'GIGANTE');
+  m('41319', 'GUADALUPE');
+  m('41349', 'HOBO');
+  m('41357', UNISTR('\00CDQUIRA'));
+  m('41359', 'ISNOS');
+  m('41378', 'LA ARGENTINA');
+  m('41396', 'LA PLATA');
+  m('41483', UNISTR('N\00C1TAGA'));
+  m('41503', 'OPORAPA');
+  m('41518', 'PAICOL');
+  m('41524', 'PALERMO');
+  m('41530', 'PALESTINA');
+  m('41548', 'PITAL');
+  m('41551', 'PITALITO');
+  m('41615', 'RIVERA');
+  m('41660', 'SALADOBLANCO');
+  m('41668', UNISTR('SAN AGUST\00CDN'));
+  m('41676', UNISTR('SANTA MAR\00CDA'));
+  m('41770', 'SUAZA');
+  m('41791', 'TARQUI');
+  m('41797', 'TESALIA');
+  m('41799', 'TELLO');
+  m('41801', 'TERUEL');
+  m('41807', UNISTR('TIMAN\00C1'));
+  m('41872', 'VILLAVIEJA');
+  m('41885', UNISTR('YAGUAR\00C1'));
+  m('44001', 'RIOHACHA');
+  m('44035', 'ALBANIA');
+  m('44078', 'BARRANCAS');
+  m('44090', 'DIBULLA');
+  m('44098', UNISTR('DISTRACCI\00D3N'));
+  m('44110', 'EL MOLINO');
+  m('44279', 'FONSECA');
+  m('44378', 'HATONUEVO');
+  m('44420', 'LA JAGUA DEL PILAR');
+  m('44430', 'MAICAO');
+  m('44560', 'MANAURE');
+  m('44650', 'SAN JUAN DEL CESAR');
+  m('44847', 'URIBIA');
+  m('44855', 'URUMITA');
+  m('44874', 'VILLANUEVA');
+  m('47001', 'SANTA MARTA');
+  m('47030', 'ALGARROBO');
+  m('47053', 'ARACATACA');
+  m('47058', UNISTR('ARIGUAN\00CD'));
+  m('47161', 'CERRO DE SAN ANTONIO');
+  m('47170', 'CHIVOLO');
+  m('47189', UNISTR('CI\00C9NAGA'));
+  m('47205', 'CONCORDIA');
+  m('47245', 'EL BANCO');
+  m('47258', UNISTR('EL PI\00D1\00D3N'));
+  m('47268', UNISTR('EL RET\00C9N'));
+  m('47288', UNISTR('FUNDACI\00D3N'));
+  m('47318', 'GUAMAL');
+  m('47460', 'NUEVA GRANADA');
+  m('47541', 'PEDRAZA');
+  m('47545', UNISTR('PIJI\00D1O DEL CARMEN'));
+  m('47551', 'PIVIJAY');
+  m('47555', 'PLATO');
+  m('47570', 'PUEBLOVIEJO');
+  m('47605', 'REMOLINO');
+  m('47660', UNISTR('SABANAS DE SAN \00C1NGEL'));
+  m('47675', 'SALAMINA');
+  m('47692', UNISTR('SAN SEBASTI\00C1N DE BUENAVISTA'));
+  m('47703', UNISTR('SAN ZEN\00D3N'));
+  m('47707', 'SANTA ANA');
+  m('47720', UNISTR('SANTA B\00C1RBARA DE PINTO'));
+  m('47745', 'SITIONUEVO');
+  m('47798', 'TENERIFE');
+  m('47960', UNISTR('ZAPAY\00C1N'));
+  m('47980', 'ZONA BANANERA');
+  m('50001', 'VILLAVICENCIO');
+  m('50006', UNISTR('ACAC\00CDAS'));
+  m('50110', UNISTR('BARRANCA DE UP\00CDA'));
+  m('50124', 'CABUYARO');
+  m('50150', 'CASTILLA LA NUEVA');
+  m('50223', 'CUBARRAL');
+  m('50226', 'CUMARAL');
+  m('50245', 'EL CALVARIO');
+  m('50251', 'EL CASTILLO');
+  m('50270', 'EL DORADO');
+  m('50287', 'FUENTE DE ORO');
+  m('50313', 'GRANADA');
+  m('50318', 'GUAMAL');
+  m('50325', UNISTR('MAPIRIP\00C1N'));
+  m('50330', 'MESETAS');
+  m('50350', 'LA MACARENA');
+  m('50370', 'URIBE');
+  m('50400', UNISTR('LEJAN\00CDAS'));
+  m('50450', 'PUERTO CONCORDIA');
+  m('50568', UNISTR('PUERTO GAIT\00C1N'));
+  m('50573', UNISTR('PUERTO L\00D3PEZ'));
+  m('50577', 'PUERTO LLERAS');
+  m('50590', 'PUERTO RICO');
+  m('50606', 'RESTREPO');
+  m('50680', 'SAN CARLOS DE GUAROA');
+  m('50683', 'SAN JUAN DE ARAMA');
+  m('50686', 'SAN JUANITO');
+  m('50689', UNISTR('SAN MART\00CDN'));
+  m('50711', 'VISTAHERMOSA');
+  m('52001', 'PASTO');
+  m('52019', UNISTR('ALB\00C1N'));
+  m('52022', 'ALDANA');
+  m('52036', 'ANCUYA');
+  m('52051', 'ARBOLEDA');
+  m('52079', 'BARBACOAS');
+  m('52083', UNISTR('BEL\00C9N'));
+  m('52110', 'BUESACO');
+  m('52203', UNISTR('COL\00D3N'));
+  m('52207', UNISTR('CONSAC\00C1'));
+  m('52210', 'CONTADERO');
+  m('52215', UNISTR('C\00D3RDOBA'));
+  m('52224', 'CUASPUD CARLOSAMA');
+  m('52227', 'CUMBAL');
+  m('52233', 'CUMBITARA');
+  m('52240', UNISTR('CHACHAG\00DC\00CD'));
+  m('52250', 'EL CHARCO');
+  m('52254', UNISTR('EL PE\00D1OL'));
+  m('52256', 'EL ROSARIO');
+  m('52258', UNISTR('EL TABL\00D3N DE G\00D3MEZ'));
+  m('52260', 'EL TAMBO');
+  m('52287', 'FUNES');
+  m('52317', 'GUACHUCAL');
+  m('52320', 'GUAITARILLA');
+  m('52323', UNISTR('GUALMAT\00C1N'));
+  m('52352', 'ILES');
+  m('52354', UNISTR('IMU\00C9S'));
+  m('52356', 'IPIALES');
+  m('52378', 'LA CRUZ');
+  m('52381', 'LA FLORIDA');
+  m('52385', 'LA LLANADA');
+  m('52390', 'LA TOLA');
+  m('52399', UNISTR('LA UNI\00D3N'));
+  m('52405', 'LEIVA');
+  m('52411', 'LINARES');
+  m('52418', 'LOS ANDES');
+  m('52427', UNISTR('MAG\00DC\00CD'));
+  m('52435', 'MALLAMA');
+  m('52473', 'MOSQUERA');
+  m('52480', UNISTR('NARI\00D1O'));
+  m('52490', 'OLAYA HERRERA');
+  m('52506', 'OSPINA');
+  m('52520', 'FRANCISCO PIZARRO');
+  m('52540', 'POLICARPA');
+  m('52560', UNISTR('POTOS\00CD'));
+  m('52565', 'PROVIDENCIA');
+  m('52573', 'PUERRES');
+  m('52585', 'PUPIALES');
+  m('52612', 'RICAURTE');
+  m('52621', UNISTR('ROBERTO PAY\00C1N'));
+  m('52678', 'SAMANIEGO');
+  m('52683', UNISTR('SANDON\00C1'));
+  m('52685', 'SAN BERNARDO');
+  m('52687', 'SAN LORENZO');
+  m('52693', 'SAN PABLO');
+  m('52694', 'SAN PEDRO DE CARTAGO');
+  m('52696', UNISTR('SANTA B\00C1RBARA'));
+  m('52699', 'SANTACRUZ');
+  m('52720', 'SAPUYES');
+  m('52786', 'TAMINANGO');
+  m('52788', 'TANGUA');
+  m('52835', UNISTR('SAN ANDR\00C9S DE TUMACO'));
+  m('52838', UNISTR('T\00DAQUERRES'));
+  m('52885', 'YACUANQUER');
+  m('54001', UNISTR('SAN JOS\00C9 DE C\00DACUTA'));
+  m('54003', UNISTR('\00C1BREGO'));
+  m('54051', 'ARBOLEDAS');
+  m('54099', 'BOCHALEMA');
+  m('54109', 'BUCARASICA');
+  m('54125', UNISTR('C\00C1COTA'));
+  m('54128', UNISTR('C\00C1CHIRA'));
+  m('54172', UNISTR('CHIN\00C1COTA'));
+  m('54174', UNISTR('CHITAG\00C1'));
+  m('54206', UNISTR('CONVENCI\00D3N'));
+  m('54223', 'CUCUTILLA');
+  m('54239', 'DURANIA');
+  m('54245', 'EL CARMEN');
+  m('54250', 'EL TARRA');
+  m('54261', 'EL ZULIA');
+  m('54313', 'GRAMALOTE');
+  m('54344', UNISTR('HACAR\00CD'));
+  m('54347', UNISTR('HERR\00C1N'));
+  m('54377', 'LABATECA');
+  m('54385', 'LA ESPERANZA');
+  m('54398', 'LA PLAYA');
+  m('54405', 'LOS PATIOS');
+  m('54418', 'LOURDES');
+  m('54480', 'MUTISCUA');
+  m('54498', UNISTR('OCA\00D1A'));
+  m('54518', 'PAMPLONA');
+  m('54520', 'PAMPLONITA');
+  m('54553', 'PUERTO SANTANDER');
+  m('54599', 'RAGONVALIA');
+  m('54660', 'SALAZAR');
+  m('54670', 'SAN CALIXTO');
+  m('54673', 'SAN CAYETANO');
+  m('54680', 'SANTIAGO');
+  m('54720', 'SARDINATA');
+  m('54743', 'SILOS');
+  m('54800', 'TEORAMA');
+  m('54810', UNISTR('TIB\00DA'));
+  m('54820', 'TOLEDO');
+  m('54871', 'VILLA CARO');
+  m('54874', 'VILLA DEL ROSARIO');
+  m('63001', 'ARMENIA');
+  m('63111', 'BUENAVISTA');
+  m('63130', UNISTR('CALARC\00C1'));
+  m('63190', 'CIRCASIA');
+  m('63212', UNISTR('C\00D3RDOBA'));
+  m('63272', 'FILANDIA');
+  m('63302', UNISTR('G\00C9NOVA'));
+  m('63401', 'LA TEBAIDA');
+  m('63470', 'MONTENEGRO');
+  m('63548', 'PIJAO');
+  m('63594', 'QUIMBAYA');
+  m('63690', 'SALENTO');
+  m('66001', 'PEREIRA');
+  m('66045', UNISTR('AP\00CDA'));
+  m('66075', 'BALBOA');
+  m('66088', UNISTR('BEL\00C9N DE UMBR\00CDA'));
+  m('66170', 'DOSQUEBRADAS');
+  m('66318', UNISTR('GU\00C1TICA'));
+  m('66383', 'LA CELIA');
+  m('66400', 'LA VIRGINIA');
+  m('66440', 'MARSELLA');
+  m('66456', UNISTR('MISTRAT\00D3'));
+  m('66572', 'PUEBLO RICO');
+  m('66594', UNISTR('QUINCH\00CDA'));
+  m('66682', 'SANTA ROSA DE CABAL');
+  m('66687', 'SANTUARIO');
+  m('68001', 'BUCARAMANGA');
+  m('68013', 'AGUADA');
+  m('68020', 'ALBANIA');
+  m('68051', 'ARATOCA');
+  m('68077', 'BARBOSA');
+  m('68079', 'BARICHARA');
+  m('68081', 'BARRANCABERMEJA');
+  m('68092', 'BETULIA');
+  m('68101', UNISTR('BOL\00CDVAR'));
+  m('68121', 'CABRERA');
+  m('68132', 'CALIFORNIA');
+  m('68147', 'CAPITANEJO');
+  m('68152', UNISTR('CARCAS\00CD'));
+  m('68160', UNISTR('CEPIT\00C1'));
+  m('68162', 'CERRITO');
+  m('68167', UNISTR('CHARAL\00C1'));
+  m('68169', 'CHARTA');
+  m('68176', 'CHIMA');
+  m('68179', UNISTR('CHIPAT\00C1'));
+  m('68190', 'CIMITARRA');
+  m('68207', UNISTR('CONCEPCI\00D3N'));
+  m('68209', 'CONFINES');
+  m('68211', UNISTR('CONTRATACI\00D3N'));
+  m('68217', 'COROMORO');
+  m('68229', UNISTR('CURIT\00CD'));
+  m('68235', UNISTR('EL CARMEN DE CHUCUR\00CD'));
+  m('68245', 'EL GUACAMAYO');
+  m('68250', UNISTR('EL PE\00D1\00D3N'));
+  m('68255', UNISTR('EL PLAY\00D3N'));
+  m('68264', 'ENCINO');
+  m('68266', 'ENCISO');
+  m('68271', UNISTR('FLORI\00C1N'));
+  m('68276', 'FLORIDABLANCA');
+  m('68296', UNISTR('GAL\00C1N'));
+  m('68298', UNISTR('G\00C1MBITA'));
+  m('68307', UNISTR('GIR\00D3N'));
+  m('68318', 'GUACA');
+  m('68320', 'GUADALUPE');
+  m('68322', UNISTR('GUAPOT\00C1'));
+  m('68324', UNISTR('GUAVAT\00C1'));
+  m('68327', UNISTR('G\00DCEPSA'));
+  m('68344', 'HATO');
+  m('68368', UNISTR('JES\00DAS MAR\00CDA'));
+  m('68370', UNISTR('JORD\00C1N'));
+  m('68377', 'LA BELLEZA');
+  m('68385', UNISTR('LAND\00C1ZURI'));
+  m('68397', 'LA PAZ');
+  m('68406', 'LEBRIJA');
+  m('68418', 'LOS SANTOS');
+  m('68425', 'MACARAVITA');
+  m('68432', UNISTR('M\00C1LAGA'));
+  m('68444', 'MATANZA');
+  m('68464', 'MOGOTES');
+  m('68468', 'MOLAGAVITA');
+  m('68498', 'OCAMONTE');
+  m('68500', 'OIBA');
+  m('68502', 'ONZAGA');
+  m('68522', 'PALMAR');
+  m('68524', 'PALMAS DEL SOCORRO');
+  m('68533', UNISTR('P\00C1RAMO'));
+  m('68547', 'PIEDECUESTA');
+  m('68549', 'PINCHOTE');
+  m('68572', 'PUENTE NACIONAL');
+  m('68573', 'PUERTO PARRA');
+  m('68575', 'PUERTO WILCHES');
+  m('68615', 'RIONEGRO');
+  m('68655', 'SABANA DE TORRES');
+  m('68669', UNISTR('SAN ANDR\00C9S'));
+  m('68673', 'SAN BENITO');
+  m('68679', 'SAN GIL');
+  m('68682', UNISTR('SAN JOAQU\00CDN'));
+  m('68684', UNISTR('SAN JOS\00C9 DE MIRANDA'));
+  m('68686', 'SAN MIGUEL');
+  m('68689', UNISTR('SAN VICENTE DE CHUCUR\00CD'));
+  m('68705', UNISTR('SANTA B\00C1RBARA'));
+  m('68720', UNISTR('SANTA HELENA DEL OP\00D3N'));
+  m('68745', 'SIMACOTA');
+  m('68755', 'SOCORRO');
+  m('68770', 'SUAITA');
+  m('68773', 'SUCRE');
+  m('68780', UNISTR('SURAT\00C1'));
+  m('68820', 'TONA');
+  m('68855', UNISTR('VALLE DE SAN JOS\00C9'));
+  m('68861', UNISTR('V\00C9LEZ'));
+  m('68867', 'VETAS');
+  m('68872', 'VILLANUEVA');
+  m('68895', 'ZAPATOCA');
+  m('70001', 'SINCELEJO');
+  m('70110', 'BUENAVISTA');
+  m('70124', 'CAIMITO');
+  m('70204', UNISTR('COLOS\00D3'));
+  m('70215', 'COROZAL');
+  m('70221', UNISTR('COVE\00D1AS'));
+  m('70230', UNISTR('CHAL\00C1N'));
+  m('70233', 'EL ROBLE');
+  m('70235', 'GALERAS');
+  m('70265', 'GUARANDA');
+  m('70400', UNISTR('LA UNI\00D3N'));
+  m('70418', 'LOS PALMITOS');
+  m('70429', 'MAJAGUAL');
+  m('70473', 'MORROA');
+  m('70508', 'OVEJAS');
+  m('70523', 'PALMITO');
+  m('70670', UNISTR('SAMPU\00C9S'));
+  m('70678', 'SAN BENITO ABAD');
+  m('70702', 'SAN JUAN DE BETULIA');
+  m('70708', 'SAN MARCOS');
+  m('70713', 'SAN ONOFRE');
+  m('70717', 'SAN PEDRO');
+  m('70742', UNISTR('SAN LUIS DE SINC\00C9'));
+  m('70771', 'SUCRE');
+  m('70820', UNISTR('SANTIAGO DE TOL\00DA'));
+  m('70823', UNISTR('SAN JOS\00C9 DE TOLUVIEJO'));
+  m('73001', UNISTR('IBAGU\00C9'));
+  m('73024', 'ALPUJARRA');
+  m('73026', 'ALVARADO');
+  m('73030', 'AMBALEMA');
+  m('73043', UNISTR('ANZO\00C1TEGUI'));
+  m('73055', 'ARMERO');
+  m('73067', 'ATACO');
+  m('73124', 'CAJAMARCA');
+  m('73148', UNISTR('CARMEN DE APICAL\00C1'));
+  m('73152', 'CASABIANCA');
+  m('73168', 'CHAPARRAL');
+  m('73200', 'COELLO');
+  m('73217', 'COYAIMA');
+  m('73226', 'CUNDAY');
+  m('73236', 'DOLORES');
+  m('73268', 'ESPINAL');
+  m('73270', 'FALAN');
+  m('73275', 'FLANDES');
+  m('73283', 'FRESNO');
+  m('73319', 'GUAMO');
+  m('73347', 'HERVEO');
+  m('73349', 'HONDA');
+  m('73352', 'ICONONZO');
+  m('73408', UNISTR('L\00C9RIDA'));
+  m('73411', UNISTR('L\00CDBANO'));
+  m('73443', UNISTR('SAN SEBASTI\00C1N DE MARIQUITA'));
+  m('73449', 'MELGAR');
+  m('73461', 'MURILLO');
+  m('73483', 'NATAGAIMA');
+  m('73504', 'ORTEGA');
+  m('73520', 'PALOCABILDO');
+  m('73547', 'PIEDRAS');
+  m('73555', 'PLANADAS');
+  m('73563', 'PRADO');
+  m('73585', UNISTR('PURIFICACI\00D3N'));
+  m('73616', 'RIOBLANCO');
+  m('73622', 'RONCESVALLES');
+  m('73624', 'ROVIRA');
+  m('73671', UNISTR('SALDA\00D1A'));
+  m('73675', 'SAN ANTONIO');
+  m('73678', 'SAN LUIS');
+  m('73686', 'SANTA ISABEL');
+  m('73770', UNISTR('SU\00C1REZ'));
+  m('73854', 'VALLE DE SAN JUAN');
+  m('73861', 'VENADILLO');
+  m('73870', 'VILLAHERMOSA');
+  m('73873', 'VILLARRICA');
+  m('76001', 'SANTIAGO DE CALI');
+  m('76020', UNISTR('ALCAL\00C1'));
+  m('76036', UNISTR('ANDALUC\00CDA'));
+  m('76041', 'ANSERMANUEVO');
+  m('76054', 'ARGELIA');
+  m('76100', UNISTR('BOL\00CDVAR'));
+  m('76109', 'BUENAVENTURA');
+  m('76111', 'GUADALAJARA DE BUGA');
+  m('76113', 'BUGALAGRANDE');
+  m('76122', 'CAICEDONIA');
+  m('76126', 'CALIMA');
+  m('76130', 'CANDELARIA');
+  m('76147', 'CARTAGO');
+  m('76233', 'DAGUA');
+  m('76243', UNISTR('EL \00C1GUILA'));
+  m('76246', 'EL CAIRO');
+  m('76248', 'EL CERRITO');
+  m('76250', 'EL DOVIO');
+  m('76275', 'FLORIDA');
+  m('76306', 'GINEBRA');
+  m('76318', UNISTR('GUACAR\00CD'));
+  m('76364', UNISTR('JAMUND\00CD'));
+  m('76377', 'LA CUMBRE');
+  m('76400', UNISTR('LA UNI\00D3N'));
+  m('76403', 'LA VICTORIA');
+  m('76497', 'OBANDO');
+  m('76520', 'PALMIRA');
+  m('76563', 'PRADERA');
+  m('76606', 'RESTREPO');
+  m('76616', UNISTR('RIOFR\00CDO'));
+  m('76622', 'ROLDANILLO');
+  m('76670', 'SAN PEDRO');
+  m('76736', 'SEVILLA');
+  m('76823', 'TORO');
+  m('76828', 'TRUJILLO');
+  m('76834', UNISTR('TULU\00C1'));
+  m('76845', 'ULLOA');
+  m('76863', 'VERSALLES');
+  m('76869', 'VIJES');
+  m('76890', 'YOTOCO');
+  m('76892', 'YUMBO');
+  m('76895', 'ZARZAL');
+  m('81001', 'ARAUCA');
+  m('81065', 'ARAUQUITA');
+  m('81220', 'CRAVO NORTE');
+  m('81300', 'FORTUL');
+  m('81591', UNISTR('PUERTO ROND\00D3N'));
+  m('81736', 'SARAVENA');
+  m('81794', 'TAME');
+  m('85001', 'YOPAL');
+  m('85010', 'AGUAZUL');
+  m('85015', UNISTR('CH\00C1MEZA'));
+  m('85125', 'HATO COROZAL');
+  m('85136', 'LA SALINA');
+  m('85139', UNISTR('MAN\00CD'));
+  m('85162', 'MONTERREY');
+  m('85225', UNISTR('NUNCH\00CDA'));
+  m('85230', UNISTR('OROCU\00C9'));
+  m('85250', 'PAZ DE ARIPORO');
+  m('85263', 'PORE');
+  m('85279', 'RECETOR');
+  m('85300', 'SABANALARGA');
+  m('85315', UNISTR('S\00C1CAMA'));
+  m('85325', 'SAN LUIS DE PALENQUE');
+  m('85400', UNISTR('T\00C1MARA'));
+  m('85410', 'TAURAMENA');
+  m('85430', 'TRINIDAD');
+  m('85440', 'VILLANUEVA');
+  m('86001', 'MOCOA');
+  m('86219', UNISTR('COL\00D3N'));
+  m('86320', 'ORITO');
+  m('86568', UNISTR('PUERTO AS\00CDS'));
+  m('86569', 'PUERTO CAICEDO');
+  m('86571', UNISTR('PUERTO GUZM\00C1N'));
+  m('86573', UNISTR('PUERTO LEGU\00CDZAMO'));
+  m('86749', 'SIBUNDOY');
+  m('86755', 'SAN FRANCISCO');
+  m('86757', 'SAN MIGUEL');
+  m('86760', 'SANTIAGO');
+  m('86865', 'VALLE DEL GUAMUEZ');
+  m('86885', UNISTR('VILLAGARZ\00D3N'));
+  m('88001', UNISTR('SAN ANDR\00C9S'), 'ISLA');
+  m('88564', 'PROVIDENCIA');
+  m('91001', 'LETICIA');
+  m('91263', 'EL ENCANTO', 'AREA_NO_MUNICIPALIZADA');
+  m('91405', 'LA CHORRERA', 'AREA_NO_MUNICIPALIZADA');
+  m('91407', 'LA PEDRERA', 'AREA_NO_MUNICIPALIZADA');
+  m('91430', 'LA VICTORIA', 'AREA_NO_MUNICIPALIZADA');
+  m('91460', UNISTR('MIRIT\00CD - PARAN\00C1'), 'AREA_NO_MUNICIPALIZADA');
+  m('91530', UNISTR('PUERTO ALEGR\00CDA'), 'AREA_NO_MUNICIPALIZADA');
+  m('91536', 'PUERTO ARICA', 'AREA_NO_MUNICIPALIZADA');
+  m('91540', UNISTR('PUERTO NARI\00D1O'));
+  m('91669', 'PUERTO SANTANDER', 'AREA_NO_MUNICIPALIZADA');
+  m('91798', UNISTR('TARAPAC\00C1'), 'AREA_NO_MUNICIPALIZADA');
+  m('94001', UNISTR('IN\00CDRIDA'));
+  m('94343', 'BARRANCOMINAS');
+  m('94883', 'SAN FELIPE', 'AREA_NO_MUNICIPALIZADA');
+  m('94884', 'PUERTO COLOMBIA', 'AREA_NO_MUNICIPALIZADA');
+  m('94885', 'LA GUADALUPE', 'AREA_NO_MUNICIPALIZADA');
+  m('94886', 'CACAHUAL', 'AREA_NO_MUNICIPALIZADA');
+  m('94887', 'PANA PANA', 'AREA_NO_MUNICIPALIZADA');
+  m('94888', 'MORICHAL', 'AREA_NO_MUNICIPALIZADA');
+  m('95001', UNISTR('SAN JOS\00C9 DEL GUAVIARE'));
+  m('95015', 'CALAMAR');
+  m('95025', 'EL RETORNO');
+  m('95200', 'MIRAFLORES');
+  m('97001', UNISTR('MIT\00DA'));
+  m('97161', UNISTR('CARUR\00DA'));
+  m('97511', 'PACOA', 'AREA_NO_MUNICIPALIZADA');
+  m('97666', 'TARAIRA');
+  m('97777', 'PAPUNAHUA', 'AREA_NO_MUNICIPALIZADA');
+  m('97889', UNISTR('YAVARAT\00C9'), 'AREA_NO_MUNICIPALIZADA');
+  m('99001', UNISTR('PUERTO CARRE\00D1O'));
+  m('99524', 'LA PRIMAVERA');
+  m('99624', UNISTR('SANTA ROSAL\00CDA'));
+  m('99773', 'CUMARIBO');
+
+  -- Conteo esperado por departamento (fuente: DANE)
+  esperado('05', 125);
+  esperado('08', 23);
+  esperado('11', 1);
+  esperado('13', 46);
+  esperado('15', 123);
+  esperado('17', 27);
+  esperado('18', 16);
+  esperado('19', 42);
+  esperado('20', 25);
+  esperado('23', 30);
+  esperado('25', 116);
+  esperado('27', 31);
+  esperado('41', 37);
+  esperado('44', 15);
+  esperado('47', 30);
+  esperado('50', 29);
+  esperado('52', 64);
+  esperado('54', 40);
+  esperado('63', 12);
+  esperado('66', 14);
+  esperado('68', 87);
+  esperado('70', 26);
+  esperado('73', 47);
+  esperado('76', 42);
+  esperado('81', 7);
+  esperado('85', 19);
+  esperado('86', 13);
+  esperado('88', 2);
+  esperado('91', 11);
+  esperado('94', 8);
+  esperado('95', 4);
+  esperado('97', 6);
+  esperado('99', 4);
+
+  -- Version cargada
+  INSERT INTO PARAMETRO (CLAVE, VALOR, DESCRIPCION)
+  VALUES ('DIVIPOLA_CORTE_AAAAMMDD', 20241230,
+          'Fecha de corte (AAAAMMDD) de la DIVIPOLA del DANE cargada en DEPARTAMENTO y MUNICIPIO.');
+
+  COMMIT;
+EXCEPTION
+  WHEN OTHERS THEN
+    ROLLBACK;
+    RAISE;
+END;
+/
+PROMPT >> DIVIPOLA cargada
+
+-- ============================================================================
+-- VERIFICACION (resultados esperados entre parentesis)
+-- ============================================================================
+SELECT COUNT(*) AS departamentos FROM DEPARTAMENTO;                          -- 33
+
+SELECT TIPO, COUNT(*) AS cantidad
+  FROM MUNICIPIO
+ GROUP BY TIPO
+ ORDER BY TIPO;                                       -- AREA_NO_MUNICIPALIZADA 18, ISLA 1, MUNICIPIO 1103
+
+SELECT COUNT(*) AS total_codigos FROM MUNICIPIO;                             -- 1122
+
+-- Comprobacion visual de las tildes (deben verse bien: BOGOTA, MEDELLIN, BAJIRA con tilde).
+SELECT CODIGO_DANE, NOMBRE, TIPO
+  FROM MUNICIPIO
+ WHERE CODIGO_DANE IN ('11001', '05001', '27493', '88001', '91263', '94343')
+ ORDER BY CODIGO_DANE;                                                       -- 6 filas
+
+SELECT VALOR FROM PARAMETRO WHERE CLAVE = 'DIVIPOLA_CORTE_AAAAMMDD';         -- 20241230
+
+SELECT object_name, object_type, status
+  FROM user_objects
+ WHERE status <> 'VALID';                                                    -- 0 filas
+
+-- ============================================================================
+-- DESHACER (solo desarrollo, y solo si ningun cliente tiene direcciones):
+-- DELETE FROM PARAMETRO WHERE CLAVE = 'DIVIPOLA_CORTE_AAAAMMDD';
+-- DELETE FROM MUNICIPIO;
+-- DELETE FROM DEPARTAMENTO;
+-- COMMIT;
+-- ============================================================================

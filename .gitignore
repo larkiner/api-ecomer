@@ -1,0 +1,20 @@
+HELP.md
+.gradle
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+### Secretos (nunca versionar) ###
+secrets.properties
+*.env
+.env
+!.env.example
+
+### IDE ###
+.idea
+*.iws
+*.iml
+*.ipr
+out/
+.vscode/
+bin/
+*.log

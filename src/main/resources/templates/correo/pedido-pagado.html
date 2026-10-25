@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" lang="es">
+<head>
+  <meta charset="UTF-8"/>
+  <title>Pedido pagado</title>
+</head>
+<body style="font-family: Arial, Helvetica, sans-serif; color: #222; max-width: 560px; margin: 0 auto;">
+  <h2>¡Gracias por tu compra, <span th:text="${nombre}">Cliente</span>!</h2>
+  <p>Recibimos el pago de tu pedido <strong th:text="'#' + ${idPedido}">#0</strong>.</p>
+
+  <table style="width: 100%; border-collapse: collapse;">
+    <thead>
+      <tr style="text-align: left; border-bottom: 1px solid #ccc;">
+        <th>SKU</th><th>Producto</th><th>Cant.</th><th style="text-align: right;">Total</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr th:each="l : ${lineas}" style="border-bottom: 1px solid #eee;">
+        <td th:text="${l.sku()}">SKU</td>
+        <td th:text="${l.nombre()}">Producto</td>
+        <td th:text="${l.cantidad()}">1</td>
+        <td style="text-align: right;" th:text="${#numbers.formatDecimal(l.total(), 1, 'POINT', 2, 'COMMA')}">0,00</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p style="text-align: right;">
+    Subtotal: $ <span th:text="${#numbers.formatDecimal(subtotal, 1, 'POINT', 2, 'COMMA')}">0,00</span><br/>
+    IVA: $ <span th:text="${#numbers.formatDecimal(impuesto, 1, 'POINT', 2, 'COMMA')}">0,00</span><br/>
+    <strong>Total: $ <span th:text="${#numbers.formatDecimal(total, 1, 'POINT', 2, 'COMMA')}">0,00</span></strong>
+  </p>
+</body>
+</html>

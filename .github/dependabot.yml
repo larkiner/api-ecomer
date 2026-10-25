@@ -1,0 +1,15 @@
+# Dependabot: abre un pull request cuando una dependencia tiene version nueva o una vulnerabilidad conocida.
+version: 2
+updates:
+  - package-ecosystem: gradle
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

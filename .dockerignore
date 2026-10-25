@@ -1,0 +1,25 @@
+# Artefactos de build (se generan dentro de la imagen)
+build/
+.gradle/
+out/
+bin/
+
+# Secretos: NUNCA entran a la imagen. Se inyectan por variables de entorno.
+secrets.properties
+*.env
+.env
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Control de versiones, docs y Docker
+.git/
+.gitignore
+.gitattributes
+README.md
+CLAUDE.md
+Dockerfile
+.dockerignore
+docker-compose.yml

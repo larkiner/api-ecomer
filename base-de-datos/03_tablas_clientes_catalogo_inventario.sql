@@ -1,0 +1,416 @@
+-- ============================================================================
+-- 03_tablas_clientes_catalogo_inventario.sql
+-- Secciones 1 y 2 del diseno: clientes, catalogo, precios, inventario, carrito
+-- y promociones (14 tablas).
+--
+-- COMO EJECUTARLO
+--   1. Conectate como ECOMERS al servicio XEPDB1 (NO como SYSTEM).
+--   2. Ejecuta como script completo (F5 en SQL Developer).
+--   3. Si falla a la mitad, ejecuta el bloque LIMPIEZA del final (esta comentado)
+--      y vuelve a correr el script completo.
+--
+-- CONVENCIONES
+--   * Claves primarias: ID_<TABLA> NUMBER(12) GENERATED ALWAYS AS IDENTITY.
+--   * Las entidades que la API expone (CLIENTE; luego PEDIDO y PAGO) llevan ID_PUBLICO
+--     RAW(16) unico. La PK numerica se usa solo en joins internos. SYS_GUID() es unico
+--     pero Oracle no lo documenta como impredecible: no lo uses como token secreto.
+--   * Importes: NUMBER(14,2) en COP. Banderas: NUMBER(1) con CHECK (0, 1).
+--   * FECHA_CREACION en todas las tablas. FECHA_MODIFICACION la mantiene un
+--     trigger BEFORE UPDATE, salvo en las tablas de solo insercion
+--     (MOVIMIENTO_STOCK y PRECIO_HIST) y en la tabla de union PROMOCION_VARIANTE.
+--   * Borrado logico con ACTIVO / ACTIVA. Los items del carrito son transitorios
+--     y si se borran fisicamente.
+--   * MOVIMIENTO_STOCK.ID_PEDIDO queda sin clave foranea: se agrega en el script
+--     de pedidos, cuando exista la tabla PEDIDO.
+-- ============================================================================
+
+SET DEFINE OFF
+WHENEVER SQLERROR EXIT SQL.SQLCODE
+
+-- Protege contra ejecutar el script con el usuario o contenedor equivocado.
+BEGIN
+  IF SYS_CONTEXT('USERENV', 'SESSION_USER') <> 'ECOMERS'
+     OR SYS_CONTEXT('USERENV', 'CON_NAME') <> 'XEPDB1' THEN
+    RAISE_APPLICATION_ERROR(-20001,
+      'Conectate como ECOMERS al servicio XEPDB1 antes de ejecutar este script.');
+  END IF;
+END;
+/
+
+-- ============================================================================
+-- SECCION 1: CATALOGOS, CLIENTES Y CATALOGO DE PRODUCTOS
+-- ============================================================================
+
+CREATE TABLE IMPUESTO (
+  ID_IMPUESTO         NUMBER(12) GENERATED ALWAYS AS IDENTITY,
+  NOMBRE              VARCHAR2(100) NOT NULL,
+  TASA                NUMBER(5,4)   NOT NULL,
+  ACTIVO              NUMBER(1)     DEFAULT 1 NOT NULL,
+  FECHA_CREACION      TIMESTAMP     DEFAULT SYSTIMESTAMP NOT NULL,
+  FECHA_MODIFICACION  TIMESTAMP,
+  CONSTRAINT PK_IMPUESTO        PRIMARY KEY (ID_IMPUESTO),
+  CONSTRAINT UQ_IMPUESTO_NOMBRE UNIQUE (NOMBRE),
+  CONSTRAINT CK_IMPUESTO_TASA   CHECK (TASA >= 0 AND TASA <= 1),
+  CONSTRAINT CK_IMPUESTO_ACTIVO CHECK (ACTIVO IN (0, 1))
+);
+
+CREATE TABLE TIPO_DOCUMENTO (
+  ID_TIPO_DOCUMENTO   NUMBER(12) GENERATED ALWAYS AS IDENTITY,
+  CODIGO              VARCHAR2(10)  NOT NULL,
+  NOMBRE              VARCHAR2(100) NOT NULL,
+  ACTIVO              NUMBER(1)     DEFAULT 1 NOT NULL,
+  FECHA_CREACION      TIMESTAMP     DEFAULT SYSTIMESTAMP NOT NULL,
+  FECHA_MODIFICACION  TIMESTAMP,
+  CONSTRAINT PK_TIPO_DOCUMENTO        PRIMARY KEY (ID_TIPO_DOCUMENTO),
+  CONSTRAINT UQ_TIPO_DOCUMENTO_CODIGO UNIQUE (CODIGO),
+  CONSTRAINT CK_TIPO_DOCUMENTO_ACTIVO CHECK (ACTIVO IN (0, 1))
+);
+
+-- La autenticacion vive fuera de la BD: esta tabla no guarda contrasenas.
+CREATE TABLE CLIENTE (
+  ID_CLIENTE          NUMBER(12) GENERATED ALWAYS AS IDENTITY,
+  ID_PUBLICO          RAW(16)       DEFAULT SYS_GUID() NOT NULL,   -- identificador que se expone en la API
+  ID_TIPO_DOCUMENTO   NUMBER(12)    NOT NULL,
+  NUMERO_DOCUMENTO    VARCHAR2(30)  NOT NULL,
+  NOMBRE              VARCHAR2(200) NOT NULL,   -- nombre completo o razon social
+  EMAIL               VARCHAR2(254) NOT NULL,
+  TELEFONO            VARCHAR2(30),
+  ACTIVO              NUMBER(1)     DEFAULT 1 NOT NULL,
+  FECHA_CREACION      TIMESTAMP     DEFAULT SYSTIMESTAMP NOT NULL,
+  FECHA_MODIFICACION  TIMESTAMP,
+  CONSTRAINT PK_CLIENTE           PRIMARY KEY (ID_CLIENTE),
+  CONSTRAINT UQ_CLIENTE_ID_PUBLICO UNIQUE (ID_PUBLICO),
+  CONSTRAINT FK_CLIENTE_TIPO_DOC  FOREIGN KEY (ID_TIPO_DOCUMENTO)
+                                  REFERENCES TIPO_DOCUMENTO (ID_TIPO_DOCUMENTO),
+  CONSTRAINT UQ_CLIENTE_DOCUMENTO UNIQUE (ID_TIPO_DOCUMENTO, NUMERO_DOCUMENTO),
+  CONSTRAINT CK_CLIENTE_EMAIL     CHECK (INSTR(EMAIL, '@') > 1),
+  CONSTRAINT CK_CLIENTE_ACTIVO    CHECK (ACTIVO IN (0, 1))
+);
+
+-- Email unico sin distinguir mayusculas de minusculas.
+CREATE UNIQUE INDEX UX_CLIENTE_EMAIL ON CLIENTE (UPPER(EMAIL));
+
+CREATE TABLE CLIENTE_DIRECCION (
+  ID_CLIENTE_DIRECCION NUMBER(12) GENERATED ALWAYS AS IDENTITY,
+  ID_CLIENTE           NUMBER(12)    NOT NULL,
+  CIUDAD               VARCHAR2(100) NOT NULL,
+  DEPARTAMENTO         VARCHAR2(100) NOT NULL,
+  DIRECCION            VARCHAR2(250) NOT NULL,
+  ES_PRINCIPAL         NUMBER(1)     DEFAULT 0 NOT NULL,
+  ACTIVO               NUMBER(1)     DEFAULT 1 NOT NULL,
+  FECHA_CREACION       TIMESTAMP     DEFAULT SYSTIMESTAMP NOT NULL,
+  FECHA_MODIFICACION   TIMESTAMP,
+  CONSTRAINT PK_CLIENTE_DIRECCION  PRIMARY KEY (ID_CLIENTE_DIRECCION),
+  CONSTRAINT FK_CLI_DIR_CLIENTE    FOREIGN KEY (ID_CLIENTE) REFERENCES CLIENTE (ID_CLIENTE),
+  CONSTRAINT CK_CLI_DIR_PRINCIPAL  CHECK (ES_PRINCIPAL IN (0, 1)),
+  CONSTRAINT CK_CLI_DIR_ACTIVO     CHECK (ACTIVO IN (0, 1))
+);
+
+CREATE INDEX IX_CLI_DIR_CLIENTE ON CLIENTE_DIRECCION (ID_CLIENTE);
+
+-- Una sola direccion principal activa por cliente: el CASE devuelve NULL para las
+-- demas filas y los NULL no entran en el indice unico.
+CREATE UNIQUE INDEX UX_CLI_DIR_PRINCIPAL ON CLIENTE_DIRECCION (
+  CASE WHEN ES_PRINCIPAL = 1 AND ACTIVO = 1 THEN ID_CLIENTE END
+);
+
+CREATE TABLE CATEGORIA (
+  ID_CATEGORIA        NUMBER(12) GENERATED ALWAYS AS IDENTITY,
+  ID_CATEGORIA_PADRE  NUMBER(12),
+  NOMBRE              VARCHAR2(100) NOT NULL,
+  ACTIVO              NUMBER(1)     DEFAULT 1 NOT NULL,
+  FECHA_CREACION      TIMESTAMP     DEFAULT SYSTIMESTAMP NOT NULL,
+  FECHA_MODIFICACION  TIMESTAMP,
+  CONSTRAINT PK_CATEGORIA        PRIMARY KEY (ID_CATEGORIA),
+  CONSTRAINT FK_CATEGORIA_PADRE  FOREIGN KEY (ID_CATEGORIA_PADRE)
+                                 REFERENCES CATEGORIA (ID_CATEGORIA),
+  -- Evita que una categoria sea su propio padre. Los ciclos mas largos los
+  -- vigila la aplicacion (la BD no los puede impedir con un CHECK).
+  CONSTRAINT CK_CATEGORIA_PADRE  CHECK (ID_CATEGORIA_PADRE IS NULL
+                                        OR ID_CATEGORIA_PADRE <> ID_CATEGORIA),
+  -- Nombre unico dentro del mismo padre (tambien entre categorias raiz).
+  CONSTRAINT UQ_CATEGORIA_NOMBRE UNIQUE (ID_CATEGORIA_PADRE, NOMBRE),
+  CONSTRAINT CK_CATEGORIA_ACTIVO CHECK (ACTIVO IN (0, 1))
+);
+
+CREATE TABLE PRODUCTO (
+  ID_PRODUCTO         NUMBER(12) GENERATED ALWAYS AS IDENTITY,
+  ID_CATEGORIA        NUMBER(12)     NOT NULL,
+  ID_IMPUESTO         NUMBER(12)     NOT NULL,
+  NOMBRE              VARCHAR2(200)  NOT NULL,
+  DESCRIPCION         VARCHAR2(2000),
+  ACTIVO              NUMBER(1)      DEFAULT 1 NOT NULL,
+  FECHA_CREACION      TIMESTAMP      DEFAULT SYSTIMESTAMP NOT NULL,
+  FECHA_MODIFICACION  TIMESTAMP,
+  CONSTRAINT PK_PRODUCTO           PRIMARY KEY (ID_PRODUCTO),
+  CONSTRAINT FK_PRODUCTO_CATEGORIA FOREIGN KEY (ID_CATEGORIA) REFERENCES CATEGORIA (ID_CATEGORIA),
+  CONSTRAINT FK_PRODUCTO_IMPUESTO  FOREIGN KEY (ID_IMPUESTO)   REFERENCES IMPUESTO (ID_IMPUESTO),
+  CONSTRAINT CK_PRODUCTO_ACTIVO    CHECK (ACTIVO IN (0, 1))
+);
+
+CREATE INDEX IX_PRODUCTO_CATEGORIA ON PRODUCTO (ID_CATEGORIA);
+CREATE INDEX IX_PRODUCTO_IMPUESTO  ON PRODUCTO (ID_IMPUESTO);
+
+-- Todo producto tiene al menos una variante: un producto simple es un producto
+-- con una sola variante. Carrito, pedido y stock apuntan siempre a VARIANTE.
+CREATE TABLE VARIANTE (
+  ID_VARIANTE         NUMBER(12) GENERATED ALWAYS AS IDENTITY,
+  ID_PRODUCTO         NUMBER(12)    NOT NULL,
+  SKU                 VARCHAR2(50)  NOT NULL,
+  NOMBRE              VARCHAR2(150) NOT NULL,   -- por ejemplo "Plan anual"
+  PRECIO_BASE         NUMBER(14,2)  NOT NULL,
+  CONTROLA_STOCK      NUMBER(1)     DEFAULT 0 NOT NULL,
+  ACTIVO              NUMBER(1)     DEFAULT 1 NOT NULL,
+  FECHA_CREACION      TIMESTAMP     DEFAULT SYSTIMESTAMP NOT NULL,
+  FECHA_MODIFICACION  TIMESTAMP,
+  CONSTRAINT PK_VARIANTE          PRIMARY KEY (ID_VARIANTE),
+  CONSTRAINT FK_VARIANTE_PRODUCTO FOREIGN KEY (ID_PRODUCTO) REFERENCES PRODUCTO (ID_PRODUCTO),
+  CONSTRAINT UQ_VARIANTE_SKU      UNIQUE (SKU),
+  CONSTRAINT CK_VARIANTE_SKU      CHECK (SKU = UPPER(TRIM(SKU))),
+  CONSTRAINT CK_VARIANTE_PRECIO   CHECK (PRECIO_BASE >= 0),
+  CONSTRAINT CK_VARIANTE_STOCK    CHECK (CONTROLA_STOCK IN (0, 1)),
+  CONSTRAINT CK_VARIANTE_ACTIVO   CHECK (ACTIVO IN (0, 1))
+);
+
+CREATE INDEX IX_VARIANTE_PRODUCTO ON VARIANTE (ID_PRODUCTO);
+
+-- Historial de precios. Solo se insertan filas: las escribe el trigger
+-- TRG_VARIANTE_PRECIO_HIST (ver mas abajo), asi no se puede saltar la auditoria.
+CREATE TABLE PRECIO_HIST (
+  ID_PRECIO_HIST   NUMBER(12) GENERATED ALWAYS AS IDENTITY,
+  ID_VARIANTE      NUMBER(12)   NOT NULL,
+  PRECIO_ANTERIOR  NUMBER(14,2),                -- NULL en el precio inicial
+  PRECIO_NUEVO     NUMBER(14,2) NOT NULL,
+  USUARIO          VARCHAR2(128) DEFAULT SYS_CONTEXT('USERENV', 'SESSION_USER') NOT NULL,
+  FECHA_CREACION   TIMESTAMP    DEFAULT SYSTIMESTAMP NOT NULL,
+  CONSTRAINT PK_PRECIO_HIST          PRIMARY KEY (ID_PRECIO_HIST),
+  CONSTRAINT FK_PRECIO_HIST_VARIANTE FOREIGN KEY (ID_VARIANTE) REFERENCES VARIANTE (ID_VARIANTE)
+);
+
+CREATE INDEX IX_PRECIO_HIST_VARIANTE ON PRECIO_HIST (ID_VARIANTE, FECHA_CREACION);
+
+-- ============================================================================
+-- SECCION 2: INVENTARIO, CARRITO Y PROMOCIONES
+-- ============================================================================
+
+-- Saldo actual. Solo para variantes con CONTROLA_STOCK = 1 (lo valida el paquete
+-- de inventario). Reservar es un UPDATE condicional que suma a CANTIDAD_RESERVADA
+-- solo si alcanza el disponible; el CHECK es la red de seguridad si falla el codigo.
+CREATE TABLE STOCK (
+  ID_VARIANTE          NUMBER(12) NOT NULL,
+  CANTIDAD_TOTAL       NUMBER(10) DEFAULT 0 NOT NULL,
+  CANTIDAD_RESERVADA   NUMBER(10) DEFAULT 0 NOT NULL,
+  CANTIDAD_DISPONIBLE  NUMBER(10) GENERATED ALWAYS AS (CANTIDAD_TOTAL - CANTIDAD_RESERVADA) VIRTUAL,
+  FECHA_CREACION       TIMESTAMP  DEFAULT SYSTIMESTAMP NOT NULL,
+  FECHA_MODIFICACION   TIMESTAMP,
+  CONSTRAINT PK_STOCK          PRIMARY KEY (ID_VARIANTE),
+  CONSTRAINT FK_STOCK_VARIANTE FOREIGN KEY (ID_VARIANTE) REFERENCES VARIANTE (ID_VARIANTE),
+  CONSTRAINT CK_STOCK_CANTIDADES CHECK (CANTIDAD_TOTAL >= 0
+                                        AND CANTIDAD_RESERVADA >= 0
+                                        AND CANTIDAD_RESERVADA <= CANTIDAD_TOTAL)
+);
+
+-- Kardex: solo se agregan filas (lo impone el trigger TRG_MOVIMIENTO_STOCK_INMUT).
+-- CANTIDAD es siempre positiva, salvo en AJUSTE, donde el signo indica el sentido.
+CREATE TABLE MOVIMIENTO_STOCK (
+  ID_MOVIMIENTO_STOCK NUMBER(12) GENERATED ALWAYS AS IDENTITY,
+  ID_VARIANTE         NUMBER(12)    NOT NULL,
+  TIPO                VARCHAR2(12)  NOT NULL,
+  CANTIDAD            NUMBER(10)    NOT NULL,
+  ID_PEDIDO           NUMBER(12),               -- FK pendiente: se agrega con PEDIDO
+  OBSERVACION         VARCHAR2(500),
+  USUARIO             VARCHAR2(128) DEFAULT SYS_CONTEXT('USERENV', 'SESSION_USER') NOT NULL,
+  FECHA_CREACION      TIMESTAMP     DEFAULT SYSTIMESTAMP NOT NULL,
+  CONSTRAINT PK_MOVIMIENTO_STOCK  PRIMARY KEY (ID_MOVIMIENTO_STOCK),
+  CONSTRAINT FK_MOV_STOCK_VARIANTE FOREIGN KEY (ID_VARIANTE) REFERENCES VARIANTE (ID_VARIANTE),
+  CONSTRAINT CK_MOV_STOCK_TIPO    CHECK (TIPO IN ('ENTRADA', 'AJUSTE', 'RESERVA', 'LIBERACION', 'CONSUMO')),
+  CONSTRAINT CK_MOV_STOCK_CANT    CHECK ((TIPO = 'AJUSTE' AND CANTIDAD <> 0)
+                                         OR (TIPO <> 'AJUSTE' AND CANTIDAD > 0))
+);
+
+CREATE INDEX IX_MOV_STOCK_VARIANTE ON MOVIMIENTO_STOCK (ID_VARIANTE, FECHA_CREACION);
+
+CREATE TABLE CARRITO (
+  ID_CARRITO               NUMBER(12) GENERATED ALWAYS AS IDENTITY,
+  ID_CLIENTE               NUMBER(12)   NOT NULL,
+  ESTADO                   VARCHAR2(12) DEFAULT 'ABIERTO' NOT NULL,
+  FECHA_ULTIMA_ACTIVIDAD   TIMESTAMP    DEFAULT SYSTIMESTAMP NOT NULL,
+  AVISO_ABANDONO_ENVIADO   NUMBER(1)    DEFAULT 0 NOT NULL,
+  FECHA_CREACION           TIMESTAMP    DEFAULT SYSTIMESTAMP NOT NULL,
+  FECHA_MODIFICACION       TIMESTAMP,
+  CONSTRAINT PK_CARRITO         PRIMARY KEY (ID_CARRITO),
+  CONSTRAINT FK_CARRITO_CLIENTE FOREIGN KEY (ID_CLIENTE) REFERENCES CLIENTE (ID_CLIENTE),
+  CONSTRAINT CK_CARRITO_ESTADO  CHECK (ESTADO IN ('ABIERTO', 'CONVERTIDO', 'ABANDONADO')),
+  CONSTRAINT CK_CARRITO_AVISO   CHECK (AVISO_ABANDONO_ENVIADO IN (0, 1))
+);
+
+CREATE INDEX IX_CARRITO_CLIENTE   ON CARRITO (ID_CLIENTE, ESTADO);
+-- Para el JOB de carritos abandonados.
+CREATE INDEX IX_CARRITO_ACTIVIDAD ON CARRITO (ESTADO, FECHA_ULTIMA_ACTIVIDAD);
+
+-- Un solo carrito ABIERTO por cliente (mismo truco del CASE que las direcciones).
+CREATE UNIQUE INDEX UX_CARRITO_ABIERTO ON CARRITO (
+  CASE WHEN ESTADO = 'ABIERTO' THEN ID_CLIENTE END
+);
+
+-- El carrito no copia precios: muestra el precio vigente. La copia fija
+-- (precio, impuesto, descuento) se hace en el pedido.
+CREATE TABLE CARRITO_ITEM (
+  ID_CARRITO_ITEM     NUMBER(12) GENERATED ALWAYS AS IDENTITY,
+  ID_CARRITO          NUMBER(12) NOT NULL,
+  ID_VARIANTE         NUMBER(12) NOT NULL,
+  CANTIDAD            NUMBER(10) NOT NULL,
+  FECHA_CREACION      TIMESTAMP  DEFAULT SYSTIMESTAMP NOT NULL,
+  FECHA_MODIFICACION  TIMESTAMP,
+  CONSTRAINT PK_CARRITO_ITEM          PRIMARY KEY (ID_CARRITO_ITEM),
+  CONSTRAINT FK_CARRITO_ITEM_CARRITO  FOREIGN KEY (ID_CARRITO)  REFERENCES CARRITO (ID_CARRITO),
+  CONSTRAINT FK_CARRITO_ITEM_VARIANTE FOREIGN KEY (ID_VARIANTE) REFERENCES VARIANTE (ID_VARIANTE),
+  CONSTRAINT UQ_CARRITO_ITEM          UNIQUE (ID_CARRITO, ID_VARIANTE),
+  CONSTRAINT CK_CARRITO_ITEM_CANT     CHECK (CANTIDAD > 0)
+);
+
+CREATE INDEX IX_CARRITO_ITEM_VARIANTE ON CARRITO_ITEM (ID_VARIANTE);
+
+CREATE TABLE PROMOCION (
+  ID_PROMOCION        NUMBER(12) GENERATED ALWAYS AS IDENTITY,
+  NOMBRE              VARCHAR2(150) NOT NULL,
+  TIPO_DESCUENTO      VARCHAR2(10)  NOT NULL,
+  VALOR               NUMBER(14,2)  NOT NULL,
+  ACTIVA              NUMBER(1)     DEFAULT 1 NOT NULL,
+  FECHA_CREACION      TIMESTAMP     DEFAULT SYSTIMESTAMP NOT NULL,
+  FECHA_MODIFICACION  TIMESTAMP,
+  CONSTRAINT PK_PROMOCION        PRIMARY KEY (ID_PROMOCION),
+  CONSTRAINT CK_PROMOCION_TIPO   CHECK (TIPO_DESCUENTO IN ('PORCENTAJE', 'MONTO')),
+  CONSTRAINT CK_PROMOCION_VALOR  CHECK ((TIPO_DESCUENTO = 'PORCENTAJE' AND VALOR > 0 AND VALOR <= 100)
+                                        OR (TIPO_DESCUENTO = 'MONTO' AND VALOR > 0)),
+  CONSTRAINT CK_PROMOCION_ACTIVA CHECK (ACTIVA IN (0, 1))
+);
+
+-- La clave primaria es la variante: una variante pertenece a una sola promocion.
+-- Para quitar una promocion se desactiva o se saca la variante de esta tabla.
+CREATE TABLE PROMOCION_VARIANTE (
+  ID_VARIANTE      NUMBER(12) NOT NULL,
+  ID_PROMOCION     NUMBER(12) NOT NULL,
+  FECHA_CREACION   TIMESTAMP  DEFAULT SYSTIMESTAMP NOT NULL,
+  CONSTRAINT PK_PROMOCION_VARIANTE  PRIMARY KEY (ID_VARIANTE),
+  CONSTRAINT FK_PROMO_VAR_VARIANTE  FOREIGN KEY (ID_VARIANTE)  REFERENCES VARIANTE (ID_VARIANTE),
+  CONSTRAINT FK_PROMO_VAR_PROMOCION FOREIGN KEY (ID_PROMOCION) REFERENCES PROMOCION (ID_PROMOCION)
+);
+
+CREATE INDEX IX_PROMO_VAR_PROMOCION ON PROMOCION_VARIANTE (ID_PROMOCION);
+
+-- ============================================================================
+-- COMENTARIOS DE TABLA
+-- ============================================================================
+COMMENT ON TABLE IMPUESTO           IS 'Impuestos aplicables a los productos (IVA y otros).';
+COMMENT ON TABLE TIPO_DOCUMENTO     IS 'Catalogo de documentos de identidad.';
+COMMENT ON TABLE CLIENTE            IS 'Compradores registrados. No guarda contrasenas. ID_PUBLICO es el identificador que expone la API.';
+COMMENT ON TABLE CLIENTE_DIRECCION  IS 'Direcciones de facturacion del cliente; una sola principal activa.';
+COMMENT ON TABLE CATEGORIA          IS 'Categorias de producto en arbol (padre opcional).';
+COMMENT ON TABLE PRODUCTO           IS 'Lo que se ofrece: servicio o producto digital.';
+COMMENT ON TABLE VARIANTE           IS 'Lo que realmente se compra; todo producto tiene al menos una.';
+COMMENT ON TABLE PRECIO_HIST        IS 'Historial de precios de la variante; solo insercion.';
+COMMENT ON TABLE STOCK              IS 'Saldo actual por variante con CONTROLA_STOCK = 1.';
+COMMENT ON TABLE MOVIMIENTO_STOCK   IS 'Kardex de inventario; solo insercion.';
+COMMENT ON TABLE CARRITO            IS 'Compra en curso; un solo carrito ABIERTO por cliente.';
+COMMENT ON TABLE CARRITO_ITEM       IS 'Lineas del carrito; no copian precios.';
+COMMENT ON TABLE PROMOCION          IS 'Descuento por porcentaje o monto fijo.';
+COMMENT ON TABLE PROMOCION_VARIANTE IS 'Variantes a las que aplica una promocion (una por variante).';
+
+-- ============================================================================
+-- TRIGGERS
+-- ============================================================================
+
+-- FECHA_MODIFICACION: un trigger BEFORE UPDATE por tabla, generado con un bucle.
+BEGIN
+  FOR t IN (SELECT column_value AS tabla
+              FROM TABLE(SYS.ODCIVARCHAR2LIST(
+                     'IMPUESTO', 'TIPO_DOCUMENTO', 'CLIENTE', 'CLIENTE_DIRECCION',
+                     'CATEGORIA', 'PRODUCTO', 'VARIANTE', 'STOCK',
+                     'CARRITO', 'CARRITO_ITEM', 'PROMOCION'))) LOOP
+    EXECUTE IMMEDIATE
+      'CREATE OR REPLACE TRIGGER TRG_' || t.tabla || '_FMOD '
+      || 'BEFORE UPDATE ON ' || t.tabla || ' FOR EACH ROW '
+      || 'BEGIN :NEW.FECHA_MODIFICACION := SYSTIMESTAMP; END;';
+  END LOOP;
+END;
+/
+
+-- Auditoria de precios: registra el precio inicial y cada cambio de PRECIO_BASE.
+-- El usuario es el CLIENT_IDENTIFIER si la aplicacion lo fija
+-- (DBMS_SESSION.SET_IDENTIFIER); si no, el usuario de base de datos.
+CREATE OR REPLACE TRIGGER TRG_VARIANTE_PRECIO_HIST
+AFTER INSERT OR UPDATE OF PRECIO_BASE ON VARIANTE
+FOR EACH ROW
+WHEN (OLD.PRECIO_BASE IS NULL OR OLD.PRECIO_BASE <> NEW.PRECIO_BASE)
+BEGIN
+  INSERT INTO PRECIO_HIST (ID_VARIANTE, PRECIO_ANTERIOR, PRECIO_NUEVO, USUARIO)
+  VALUES (:NEW.ID_VARIANTE, :OLD.PRECIO_BASE, :NEW.PRECIO_BASE,
+          NVL(SYS_CONTEXT('USERENV', 'CLIENT_IDENTIFIER'),
+              SYS_CONTEXT('USERENV', 'SESSION_USER')));
+END;
+/
+
+-- Tablas de solo insercion: se rechaza cualquier UPDATE o DELETE.
+CREATE OR REPLACE TRIGGER TRG_PRECIO_HIST_INMUT
+BEFORE UPDATE OR DELETE ON PRECIO_HIST
+BEGIN
+  RAISE_APPLICATION_ERROR(-20010, 'PRECIO_HIST es de solo insercion: no se edita ni se borra.');
+END;
+/
+
+CREATE OR REPLACE TRIGGER TRG_MOVIMIENTO_STOCK_INMUT
+BEFORE UPDATE OR DELETE ON MOVIMIENTO_STOCK
+BEGIN
+  RAISE_APPLICATION_ERROR(-20010, 'MOVIMIENTO_STOCK es de solo insercion: no se edita ni se borra.');
+END;
+/
+
+-- ============================================================================
+-- DATOS INICIALES
+-- ============================================================================
+INSERT INTO TIPO_DOCUMENTO (CODIGO, NOMBRE) VALUES ('CC',  'Cedula de ciudadania');
+INSERT INTO TIPO_DOCUMENTO (CODIGO, NOMBRE) VALUES ('CE',  'Cedula de extranjeria');
+INSERT INTO TIPO_DOCUMENTO (CODIGO, NOMBRE) VALUES ('NIT', 'Numero de identificacion tributaria');
+INSERT INTO TIPO_DOCUMENTO (CODIGO, NOMBRE) VALUES ('PAS', 'Pasaporte');
+
+-- Ajusta las tarifas si tu negocio usa otras.
+INSERT INTO IMPUESTO (NOMBRE, TASA) VALUES ('IVA 19%', 0.19);
+INSERT INTO IMPUESTO (NOMBRE, TASA) VALUES ('Sin IVA',  0);
+
+COMMIT;
+
+-- ============================================================================
+-- VERIFICACION (resultados esperados entre parentesis)
+-- ============================================================================
+SELECT COUNT(*) AS tablas FROM user_tables;                                  -- 14
+
+SELECT object_name, object_type, status
+  FROM user_objects
+ WHERE status <> 'VALID';                                                    -- 0 filas
+
+SELECT trigger_name, table_name, status
+  FROM user_triggers
+ ORDER BY table_name, trigger_name;                                          -- 14 triggers, ENABLED
+
+SELECT 'TIPO_DOCUMENTO' AS tabla, COUNT(*) AS filas FROM TIPO_DOCUMENTO      -- 4
+UNION ALL
+SELECT 'IMPUESTO', COUNT(*) FROM IMPUESTO;                                   -- 2
+
+-- ============================================================================
+-- LIMPIEZA (solo desarrollo): quita el comentario para repetir la ejecucion.
+-- ============================================================================
+-- DROP TABLE PROMOCION_VARIANTE  CASCADE CONSTRAINTS PURGE;
+-- DROP TABLE PROMOCION           CASCADE CONSTRAINTS PURGE;
+-- DROP TABLE CARRITO_ITEM        CASCADE CONSTRAINTS PURGE;
+-- DROP TABLE CARRITO             CASCADE CONSTRAINTS PURGE;
+-- DROP TABLE MOVIMIENTO_STOCK    CASCADE CONSTRAINTS PURGE;
+-- DROP TABLE STOCK               CASCADE CONSTRAINTS PURGE;
+-- DROP TABLE PRECIO_HIST         CASCADE CONSTRAINTS PURGE;
+-- DROP TABLE VARIANTE            CASCADE CONSTRAINTS PURGE;
+-- DROP TABLE PRODUCTO            CASCADE CONSTRAINTS PURGE;
+-- DROP TABLE CATEGORIA           CASCADE CONSTRAINTS PURGE;
+-- DROP TABLE CLIENTE_DIRECCION   CASCADE CONSTRAINTS PURGE;
+-- DROP TABLE CLIENTE             CASCADE CONSTRAINTS PURGE;
+-- DROP TABLE TIPO_DOCUMENTO      CASCADE CONSTRAINTS PURGE;
+-- DROP TABLE IMPUESTO            CASCADE CONSTRAINTS PURGE;

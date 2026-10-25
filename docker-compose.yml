@@ -1,0 +1,35 @@
+# ============================================================
+# docker-compose de ECOMERS API (desarrollo)
+#
+#   cp .env.example .env      # y rellenar las claves
+#   docker compose up --build
+#
+# Oracle NO va aqui: la API se conecta a tu Oracle local (host.docker.internal:1521).
+# Levanta tambien Mailpit (correo de prueba, http://localhost:8025). La identidad (registro y login) es de la
+# propia API: no hay servidor de identidad aparte.
+# Solo Mailpit, sin la API:  docker compose up mailpit
+# ============================================================
+services:
+  api:
+    build: .
+    image: ecomers-api:latest
+    ports:
+      - "${HOST_PORT:-8080}:8080"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DB_HOST: ${DB_HOST:-host.docker.internal:1521}
+      SMTP_HOST: mailpit
+      SMTP_PORT: 1025
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - mailpit
+    restart: unless-stopped
+
+  mailpit:
+    image: axllent/mailpit:v1.27
+    ports:
+      - "1025:1025"   # SMTP
+      - "8025:8025"   # bandeja web
