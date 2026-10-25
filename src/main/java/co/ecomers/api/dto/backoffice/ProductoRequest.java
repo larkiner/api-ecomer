@@ -6,21 +6,23 @@ import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 import java.util.List;
+import co.ecomers.api.dto.comun.TextoPlano;
+import jakarta.validation.constraints.Positive;
 
 /** Crear un producto con sus variantes en una sola operación: queda vendible. Al menos una variante. */
 public record ProductoRequest(
         @NotNull(message = "idCategoria es obligatorio")
-        Long idCategoria,
+        @Positive(message = "idCategoria debe ser un número positivo") Long idCategoria,
 
         @NotNull(message = "idImpuesto es obligatorio")
-        Long idImpuesto,
+        @Positive(message = "idImpuesto debe ser un número positivo") Long idImpuesto,
 
         @NotBlank(message = "El nombre es obligatorio")
         @Size(max = 200, message = "El nombre admite hasta 200 caracteres")
-        String nombre,
+        @TextoPlano String nombre,
 
         @Size(max = 2000, message = "La descripción admite hasta 2000 caracteres")
-        String descripcion,
+        @TextoPlano(multilinea = true) String descripcion,
 
         @Size(max = 500, message = "La URL de la imagen admite hasta 500 caracteres")
         String imagenUrl,

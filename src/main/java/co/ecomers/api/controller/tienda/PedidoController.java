@@ -17,6 +17,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
+import jakarta.validation.constraints.Positive;
 
 /**
  * Pedidos del cliente autenticado (rol CLIENTE). Flujo: carrito -> crear pedido (reserva stock)
@@ -44,7 +45,7 @@ public class PedidoController {
 
     @PostMapping("/{idPedido}/cancelacion")
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void cancelar(ClienteActual cliente, @PathVariable long idPedido,
+    public void cancelar(ClienteActual cliente, @PathVariable @Positive long idPedido,
                          @Valid @RequestBody(required = false) CancelarPedidoRequest req) {
         pedidos.cancelar(cliente, idPedido, req);
     }
@@ -52,7 +53,7 @@ public class PedidoController {
     /** Crea (o recupera) el intento de pago y devuelve el enlace firmado al checkout de Wompi. */
     @PostMapping("/{idPedido}/pagos")
     @ResponseStatus(HttpStatus.CREATED)
-    public IniciarPagoResponse iniciarPago(ClienteActual cliente, @PathVariable long idPedido) {
+    public IniciarPagoResponse iniciarPago(ClienteActual cliente, @PathVariable @Positive long idPedido) {
         return pagos.iniciar(cliente, idPedido);
     }
 }

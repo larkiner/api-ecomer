@@ -29,13 +29,16 @@ public class JwtService {
     private final JwtEncoder encoder;
     private final Duration vida;
     private final String emisor;
+    private final String audiencia;
 
     public JwtService(JwtEncoder encoder,
                       @Value("${app.jwt.expiration-ms}") long expirationMs,
-                      @Value("${app.jwt.issuer}") String emisor) {
+                      @Value("${app.jwt.issuer}") String emisor,
+                      @Value("${app.jwt.audience}") String audiencia) {
         this.encoder = encoder;
         this.vida = Duration.ofMillis(expirationMs);
         this.emisor = emisor;
+        this.audiencia = audiencia;
     }
 
     /**
@@ -46,6 +49,7 @@ public class JwtService {
         Instant ahora = Instant.now();
         var claims = JwtClaimsSet.builder()
                 .issuer(emisor)
+                .audience(List.of(audiencia))
                 .subject(cuenta.email())
                 .id(UUID.randomUUID().toString())
                 .issuedAt(ahora)

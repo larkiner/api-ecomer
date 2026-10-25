@@ -61,7 +61,8 @@ public class SecurityConfig {
     @Order(2)
     public SecurityFilterChain api(HttpSecurity http,
                                    @Value("${app.rate-limit.solicitudes-por-minuto:120}") int solicitudesPorMinuto,
-                                   @Value("${app.rate-limit.auth-por-minuto:10}") int authPorMinuto)
+                                   @Value("${app.rate-limit.auth-por-minuto:10}") int authPorMinuto,
+                                   @Value("${app.rate-limit.usuario-por-minuto:100}") int usuarioPorMinuto)
             throws Exception {
         http.csrf(AbstractHttpConfigurer::disable)
                 .cors(Customizer.withDefaults())
@@ -107,7 +108,9 @@ public class SecurityConfig {
                 .addFilterBefore(new RateLimitingFilter(solicitudesPorMinuto), TamanoCuerpoFilter.class)
                 // Registro y login: mucho mas estricto, contra la fuerza bruta de credenciales. Misma clase y mismo
                 // ancla, asi que Spring los ordena juntos (los dos van antes de TamanoCuerpoFilter).
-                .addFilterBefore(new RateLimitingFilter(authPorMinuto, RUTA_AUTH), TamanoCuerpoFilter.class);
+                .addFilterBefore(new RateLimitingFilter(authPorMinuto, RUTA_AUTH), TamanoCuerpoFilter.class)
+                // Por usuario: despues de validar el token, para contar por cuenta aunque cambie de IP.
+                .addFilterAfter(RateLimitingFilter.porUsuario(usuarioPorMinuto), BearerTokenAuthenticationFilter.class);
         return http.build();
     }
 
@@ -131,15 +134,37 @@ public class SecurityConfig {
                         || uri.equals(RUTA_AUTH + "registro") || uri.equals(RUTA_AUTH + "login")));
     }
 
+    /**
+     * CORS: solo los origenes exactos del frontend (nada de comodines), sin cookies (la sesion viaja en Authorization),
+     * solo los metodos y cabeceras que la API usa, y Retry-After visible para que el frontend sepa cuanto esperar tras
+     * un 429. Un origen mal escrito detiene el arranque en lugar de dejar el CORS abierto o roto en silencio.
+     */
     @Bean
     public CorsConfigurationSource corsConfigurationSource(@Value("${app.cors.allowed-origins}") List<String> origenes) {
         var cfg = new CorsConfiguration();
-        cfg.setAllowedOrigins(origenes);
+        cfg.setAllowedOrigins(origenesValidos(origenes));
         cfg.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS"));
         cfg.setAllowedHeaders(List.of("Authorization", "Content-Type"));
+        cfg.setExposedHeaders(List.of("Retry-After"));
+        cfg.setAllowCredentials(false);
         cfg.setMaxAge(3600L);
         var fuente = new UrlBasedCorsConfigurationSource();
         fuente.registerCorsConfiguration("/api/**", cfg);
         return fuente;
+    }
+
+    /** Cada origen debe ser {@code http(s)://host[:puerto]}, sin ruta, sin barra final y sin comodines. */
+    static List<String> origenesValidos(List<String> origenes) {
+        List<String> limpios = origenes.stream().map(String::trim).filter(o -> !o.isEmpty()).toList();
+        if (limpios.isEmpty()) {
+            throw new IllegalStateException("CORS_ALLOWED_ORIGINS esta vacio: define el origen del frontend");
+        }
+        for (String origen : limpios) {
+            if (!origen.matches("https?://[A-Za-z0-9.-]+(:\\d{1,5})?")) {
+                throw new IllegalStateException("CORS_ALLOWED_ORIGINS tiene un origen invalido: '" + origen
+                        + "'. Usa http(s)://dominio[:puerto], sin ruta, sin barra final y sin *");
+            }
+        }
+        return limpios;
     }
 }

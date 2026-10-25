@@ -18,6 +18,7 @@ import co.ecomers.api.model.Credencial;
 import co.ecomers.api.repository.backoffice.EmpleadoAuthRepository;
 import co.ecomers.api.repository.backoffice.TrabajadorRepository;
 import co.ecomers.api.security.InvalidacionSesionService;
+import co.ecomers.api.security.LimiteIntentosLogin;
 import co.ecomers.api.service.auth.CredencialService;
 import co.ecomers.api.service.auth.JwtService;
 import co.ecomers.api.service.auth.PasswordService;
@@ -38,7 +39,7 @@ import org.springframework.test.web.servlet.MockMvc;
  * logout → el token ya no sirve. Solo la base (credenciales) y la logica de carrito/reportes van simuladas.
  */
 @PruebaWeb({AuthController.class, CarritoController.class, ReporteController.class, TrabajadorController.class})
-@Import({JwtService.class, SesionService.class, TrabajadorService.class})
+@Import({JwtService.class, SesionService.class, TrabajadorService.class, LimiteIntentosLogin.class})
 class SesionIntegradaTest {
 
 

@@ -23,6 +23,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
+import jakarta.validation.constraints.Positive;
 
 /**
  * Productos, variantes e impuestos. Leer: cualquier empleado. Crear, editar y activar o desactivar: permiso
@@ -57,35 +58,35 @@ public class ProductoController {
 
     @PutMapping("/productos/{idProducto}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void actualizar(EmpleadoActual empleado, @PathVariable long idProducto,
+    public void actualizar(EmpleadoActual empleado, @PathVariable @Positive long idProducto,
                            @Valid @RequestBody ProductoEdicionRequest req) {
         servicio.actualizarProducto(empleado, idProducto, req);
     }
 
     @PutMapping("/productos/{idProducto}/estado")
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void cambiarEstadoProducto(EmpleadoActual empleado, @PathVariable long idProducto,
+    public void cambiarEstadoProducto(EmpleadoActual empleado, @PathVariable @Positive long idProducto,
                                       @Valid @RequestBody EstadoRequest req) {
         servicio.cambiarEstadoProducto(empleado, idProducto, req.activo());
     }
 
     @PostMapping("/productos/{idProducto}/variantes")
     @ResponseStatus(HttpStatus.CREATED)
-    public VarianteCreadaResponse agregarVariante(EmpleadoActual empleado, @PathVariable long idProducto,
+    public VarianteCreadaResponse agregarVariante(EmpleadoActual empleado, @PathVariable @Positive long idProducto,
                                                   @Valid @RequestBody VarianteRequest req) {
         return servicio.agregarVariante(empleado, idProducto, req);
     }
 
     @PutMapping("/variantes/{idVariante}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void actualizarVariante(EmpleadoActual empleado, @PathVariable long idVariante,
+    public void actualizarVariante(EmpleadoActual empleado, @PathVariable @Positive long idVariante,
                                    @Valid @RequestBody VarianteEdicionRequest req) {
         servicio.actualizarVariante(empleado, idVariante, req);
     }
 
     @PutMapping("/variantes/{idVariante}/estado")
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void cambiarEstadoVariante(EmpleadoActual empleado, @PathVariable long idVariante,
+    public void cambiarEstadoVariante(EmpleadoActual empleado, @PathVariable @Positive long idVariante,
                                       @Valid @RequestBody EstadoRequest req) {
         servicio.cambiarEstadoVariante(empleado, idVariante, req.activo());
     }

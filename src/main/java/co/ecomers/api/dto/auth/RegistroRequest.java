@@ -4,12 +4,13 @@ import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
+import co.ecomers.api.dto.comun.TextoPlano;
 
 /** Registro publico: siempre crea un CLIENTE. El personal no se auto-registra. */
 public record RegistroRequest(
         @NotBlank(message = "El nombre es obligatorio")
         @Size(max = 200, message = "El nombre admite hasta 200 caracteres")
-        String nombre,
+        @TextoPlano String nombre,
 
         @NotBlank(message = "El email es obligatorio")
         @Email(message = "El email no tiene un formato válido")

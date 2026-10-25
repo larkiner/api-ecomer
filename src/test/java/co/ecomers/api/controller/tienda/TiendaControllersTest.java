@@ -281,4 +281,13 @@ class TiendaControllersTest {
                 .andExpect(status().isServiceUnavailable())
                 .andExpect(jsonPath("$.codigo").value("PASARELA_NO_CONFIGURADA"));
     }
+
+    @Test
+    void unIdNegativoEnLaRutaEsValidacionYNoLlegaAlServicio() throws Exception {
+        mvc.perform(get("/api/v1/catalogo/variantes/-1"))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.codigo").value("VALIDACION"));
+        mvc.perform(get("/api/v1/catalogo/variantes?categoria=-3"))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.codigo").value("VALIDACION"));
+        verifyNoInteractions(catalogo);
+    }
 }

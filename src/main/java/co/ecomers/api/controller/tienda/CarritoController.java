@@ -14,6 +14,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
+import jakarta.validation.constraints.Positive;
 
 /**
  * Carrito del cliente autenticado (rol CLIENTE). No hay GET: el rol cliente no puede leer CARRITO
@@ -37,14 +38,14 @@ public class CarritoController {
 
     @PutMapping("/items/{idVariante}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void cambiarCantidad(ClienteActual cliente, @PathVariable long idVariante,
+    public void cambiarCantidad(ClienteActual cliente, @PathVariable @Positive long idVariante,
                                 @Valid @RequestBody CambiarCantidadRequest req) {
         servicio.cambiarCantidad(cliente, idVariante, req);
     }
 
     @DeleteMapping("/items/{idVariante}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void quitar(ClienteActual cliente, @PathVariable long idVariante) {
+    public void quitar(ClienteActual cliente, @PathVariable @Positive long idVariante) {
         servicio.quitar(cliente, idVariante);
     }
 

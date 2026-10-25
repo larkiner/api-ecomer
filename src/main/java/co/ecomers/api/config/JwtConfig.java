@@ -19,6 +19,9 @@ import org.springframework.security.oauth2.jwt.JwtEncoder;
 import org.springframework.security.oauth2.jwt.JwtValidators;
 import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
 import org.springframework.security.oauth2.jwt.NimbusJwtEncoder;
+import java.util.List;
+import org.springframework.security.oauth2.jwt.JwtClaimNames;
+import org.springframework.security.oauth2.jwt.JwtClaimValidator;
 
 /**
  * Firma y validación de los tokens propios (HS256) y el hash de contraseñas (BCrypt). El secreto sale de
@@ -48,10 +51,13 @@ public class JwtConfig {
     /** Valida firma, vigencia y emisor, y además que el token no esté revocado (logout o cambio de contraseña). */
     @Bean
     public JwtDecoder jwtDecoder(SecretKey claveJwt, @Value("${app.jwt.issuer}") String emisor,
+                                 @Value("${app.jwt.audience}") String audiencia,
                                  TokenBlacklistService blacklist, InvalidacionSesionService invalidacion) {
         NimbusJwtDecoder decoder = NimbusJwtDecoder.withSecretKey(claveJwt).macAlgorithm(MacAlgorithm.HS256).build();
         decoder.setJwtValidator(new DelegatingOAuth2TokenValidator<>(
                 JwtValidators.createDefaultWithIssuer(emisor),
+                // La audiencia: un token firmado con el mismo secreto pero emitido para otro sistema no sirve aqui.
+                new JwtClaimValidator<List<String>>(JwtClaimNames.AUD, aud -> aud != null && aud.contains(audiencia)),
                 new RevocacionTokenValidator(blacklist, invalidacion)));
         return decoder;
     }

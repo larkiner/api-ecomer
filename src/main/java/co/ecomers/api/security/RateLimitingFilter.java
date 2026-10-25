@@ -12,9 +12,13 @@ import java.io.IOException;
 import java.time.Duration;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.springframework.web.filter.OncePerRequestFilter;
+import java.util.function.Function;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
 
 /**
- * Rate limiting por IP (ventana fija de 1 minuto) para /api/**. La pasarela (webhook) queda fuera:
+ * Rate limiting (ventana fija de 1 minuto) para /api/**, por IP o por usuario autenticado ({@link #porUsuario}). La pasarela (webhook) queda fuera:
  * sus reintentos no deben perderse. En memoria y acotado (Caffeine expira las ventanas solo): para
  * varias instancias, cambiar por un contador compartido o limitar en el gateway.
  *
@@ -29,6 +33,8 @@ public class RateLimitingFilter extends OncePerRequestFilter {
     /** Si no es nulo, el filtro limita SOLO las rutas con este prefijo (por ejemplo, registro y login). */
     private final String prefijo;
     private final Cache<String, AtomicInteger> ventanas;
+    /** De que se cuenta: la IP, o el usuario del token. Si devuelve null, la peticion no se limita aqui. */
+    private final Function<HttpServletRequest, String> clave;
 
     public RateLimitingFilter(int solicitudesPorMinuto) {
         this(solicitudesPorMinuto, null, Ticker.systemTicker());
@@ -44,6 +50,11 @@ public class RateLimitingFilter extends OncePerRequestFilter {
     }
 
     RateLimitingFilter(int solicitudesPorMinuto, String prefijo, Ticker reloj) {
+        this(solicitudesPorMinuto, prefijo, reloj, HttpServletRequest::getRemoteAddr);
+    }
+
+    RateLimitingFilter(int solicitudesPorMinuto, String prefijo, Ticker reloj, Function<HttpServletRequest, String> clave) {
+        this.clave = clave;
         this.limite = solicitudesPorMinuto;
         this.prefijo = prefijo;
         this.ventanas = Caffeine.newBuilder().expireAfterWrite(VENTANA).maximumSize(MAX_IPS).ticker(reloj).build();
@@ -64,7 +75,12 @@ public class RateLimitingFilter extends OncePerRequestFilter {
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
             throws ServletException, IOException {
-        AtomicInteger conteo = ventanas.get(request.getRemoteAddr(), ip -> new AtomicInteger());
+        String quien = clave.apply(request);
+        if (quien == null) {
+            chain.doFilter(request, response);
+            return;
+        }
+        AtomicInteger conteo = ventanas.get(quien, k -> new AtomicInteger());
         if (conteo.incrementAndGet() > limite) {
             response.setHeader("Retry-After", String.valueOf(VENTANA.toSeconds()));
             RespuestasSeguridad.escribir(response, CodigoError.DEMASIADAS_SOLICITUDES,
@@ -72,5 +88,22 @@ public class RateLimitingFilter extends OncePerRequestFilter {
             return;
         }
         chain.doFilter(request, response);
+    }
+
+    /**
+     * Limite por usuario autenticado, sin importar desde cuantas IP llegue: frena a quien reparte un token entre muchas
+     * maquinas. Va despues de la autenticacion del token; las peticiones anonimas las cubre el limite por IP.
+     */
+    public static RateLimitingFilter porUsuario(int solicitudesPorMinuto) {
+        return porUsuario(solicitudesPorMinuto, Ticker.systemTicker());
+    }
+
+    static RateLimitingFilter porUsuario(int solicitudesPorMinuto, Ticker reloj) {
+        return new RateLimitingFilter(solicitudesPorMinuto, null, reloj, RateLimitingFilter::usuarioAutenticado);
+    }
+
+    static String usuarioAutenticado(HttpServletRequest request) {
+        Authentication autenticacion = SecurityContextHolder.getContext().getAuthentication();
+        return autenticacion instanceof JwtAuthenticationToken token ? "usuario:" + token.getName() : null;
     }
 }

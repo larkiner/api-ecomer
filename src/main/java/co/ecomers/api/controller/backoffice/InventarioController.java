@@ -12,6 +12,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
+import jakarta.validation.constraints.Positive;
 
 /** Inventario (rol EMPLEADO). Cada movimiento queda en el kardex con el usuario del empleado. */
 @RestController
@@ -26,14 +27,14 @@ public class InventarioController {
 
     @PostMapping("/{idVariante}/entradas")
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void entrada(EmpleadoActual empleado, @PathVariable long idVariante,
+    public void entrada(EmpleadoActual empleado, @PathVariable @Positive long idVariante,
                         @Valid @RequestBody EntradaInventarioRequest req) {
         servicio.registrarEntrada(empleado, idVariante, req);
     }
 
     @PostMapping("/{idVariante}/ajustes")
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void ajuste(EmpleadoActual empleado, @PathVariable long idVariante,
+    public void ajuste(EmpleadoActual empleado, @PathVariable @Positive long idVariante,
                        @Valid @RequestBody AjusteInventarioRequest req) {
         servicio.registrarAjuste(empleado, idVariante, req);
     }

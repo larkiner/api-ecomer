@@ -32,6 +32,7 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.oauth2.jwt.JwtEncoder;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.jwt.JwtEncoderParameters;
+import co.ecomers.api.security.LimiteIntentosLogin;
 
 /** Registro, login, logout y cambio de contrasena con repositorios simulados y BCrypt real. */
 class AuthServiciosTest {
@@ -46,8 +47,8 @@ class AuthServiciosTest {
     private final JwtEncoder jwtEncoder = mock(JwtEncoder.class);
 
     private final CredencialService credenciales = new CredencialService(clientes, empleados, encoder);
-    private final JwtService jwt = new JwtService(jwtEncoder, 3_600_000, "ecomers-api");
-    private final SesionService sesion = new SesionService(credenciales, jwt, blacklist, empleados);
+    private final JwtService jwt = new JwtService(jwtEncoder, 3_600_000, "ecomers-api", "ecomers-web");
+    private final SesionService sesion = new SesionService(credenciales, jwt, blacklist, empleados, new LimiteIntentosLogin());
     private final RegistroService registro = new RegistroService(clientes, encoder, sesion);
     private final PasswordService password =
             new PasswordService(credenciales, clientes, empleados, invalidacion, encoder);

@@ -30,11 +30,11 @@ class JwtConfigTest {
     private final InvalidacionSesionService invalidacion = new InvalidacionSesionService(3_600_000);
 
     private JwtDecoder decoder(String secreto, String emisor) {
-        return config.jwtDecoder(config.claveJwt(secreto), emisor, blacklist, invalidacion);
+        return config.jwtDecoder(config.claveJwt(secreto), emisor, "ecomers-web", blacklist, invalidacion);
     }
 
     private JwtService servicio(String secreto, long vidaMs, String emisor) {
-        return new JwtService(config.jwtEncoder(config.claveJwt(secreto)), vidaMs, emisor);
+        return new JwtService(config.jwtEncoder(config.claveJwt(secreto)), vidaMs, emisor, "ecomers-web");
     }
 
     private static final Credencial CLIENTE = new Credencial(7L, "ana@correo.com", "hash", true, "CLIENTE");
@@ -145,5 +145,15 @@ class JwtConfigTest {
         assertThatThrownBy(() -> config.claveJwt("corto"))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("JWT_SECRET");
+    }
+
+    @Test
+    void unTokenEmitidoParaOtraAudienciaSeRechaza() {
+        var token = servicio(SECRETO, 3_600_000, EMISOR).emitir(CLIENTE, List.of()).valor();
+        var otroSistema = config.jwtDecoder(config.claveJwt(SECRETO), EMISOR, "otro-sistema", blacklist, invalidacion);
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> otroSistema.decode(token))
+                .isInstanceOf(org.springframework.security.oauth2.jwt.JwtValidationException.class);
+        assertThat(decoder(SECRETO, EMISOR).decode(token).getAudience()).containsExactly("ecomers-web");
     }
 }

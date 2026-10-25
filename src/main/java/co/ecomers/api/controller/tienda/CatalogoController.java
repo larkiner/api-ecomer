@@ -14,6 +14,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import jakarta.validation.constraints.Positive;
 
 /**
  * Catalogo publico. Sale con Cache-Control explicito: sin el, Spring Security marca la respuesta
@@ -33,7 +34,7 @@ public class CatalogoController {
 
     @GetMapping("/variantes")
     public ResponseEntity<PaginaResponse<VarianteResponse>> buscar(@RequestParam(required = false) String q,
-                                                                   @RequestParam(required = false) Long categoria,
+                                                                   @RequestParam(required = false) @Positive Long categoria,
                                                                    @RequestParam(defaultValue = "0") int page,
                                                                    @RequestParam(defaultValue = "20") int size) {
         return ResponseEntity.ok().cacheControl(cacheControl).body(servicio.buscar(q, categoria, page, size));
@@ -45,7 +46,7 @@ public class CatalogoController {
     }
 
     @GetMapping("/variantes/{idVariante}")
-    public ResponseEntity<VarianteResponse> obtener(@PathVariable long idVariante) {
+    public ResponseEntity<VarianteResponse> obtener(@PathVariable @Positive long idVariante) {
         return ResponseEntity.ok().cacheControl(cacheControl).body(servicio.obtener(idVariante));
     }
 }

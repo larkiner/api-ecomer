@@ -3,12 +3,13 @@ package co.ecomers.api.dto.backoffice;
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
+import co.ecomers.api.dto.comun.TextoPlano;
 
 /** Alta de un trabajador por el admin. La contraseña inicial pasa por la política de contraseñas y se guarda con BCrypt. */
 public record CrearTrabajadorRequest(
         @NotBlank(message = "El nombre es obligatorio")
         @Size(max = 200, message = "El nombre admite hasta 200 caracteres")
-        String nombre,
+        @TextoPlano String nombre,
 
         @NotBlank(message = "El email es obligatorio")
         @Email(message = "El email no tiene un formato válido")

@@ -217,6 +217,13 @@ Levanta la API y Mailpit. La API se conecta a tu Oracle local (`host.docker.inte
 las pruebas rápidas al construirse y se ejecuta con un usuario sin privilegios. Los secretos llegan solo por variables
 de entorno.
 
+- **Seguridad**:
+  - Límite de solicitudes por IP en toda la API, más estricto en registro y login, y otro por usuario autenticado aunque
+    cambie de IP. Tras 5 contraseñas equivocadas para el mismo correo, ese correo queda bloqueado 15 minutos.
+  - CORS solo con los orígenes exactos de `CORS_ALLOWED_ORIGINS`. Uno mal escrito (con `*`, ruta o barra final) detiene
+    el arranque. Expone `Retry-After` y no usa cookies.
+  - El token lleva emisor y audiencia (`JWT_AUDIENCE`) y dura 2 horas. Los textos que escribe una persona rechazan
+    caracteres de control e invisibles, y los IDs de las rutas deben ser positivos.
 - **Chequeo de salud**: la imagen consulta `/actuator/health` cada 30 s (`docker ps` muestra `healthy`).
 - **Detrás de un proxy o balanceador** (Nginx, Traefik, la nube): `FORWARD_HEADERS_STRATEGY=native`, para que el límite
   de solicitudes cuente por la IP real del cliente y no por la del proxy. Sin proxy delante se deja en `none`.

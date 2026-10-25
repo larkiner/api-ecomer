@@ -17,6 +17,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
+import jakarta.validation.constraints.Positive;
 
 /**
  * Categorías. Leer: cualquier empleado. Crear, editar y activar o desactivar: permiso {@code CATEGORIAS} (o admin), que
@@ -45,14 +46,14 @@ public class CategoriaController {
 
     @PutMapping("/{idCategoria}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void actualizar(EmpleadoActual empleado, @PathVariable long idCategoria,
+    public void actualizar(EmpleadoActual empleado, @PathVariable @Positive long idCategoria,
                            @Valid @RequestBody CategoriaRequest req) {
         servicio.actualizarCategoria(empleado, idCategoria, req);
     }
 
     @PutMapping("/{idCategoria}/estado")
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void cambiarEstado(EmpleadoActual empleado, @PathVariable long idCategoria,
+    public void cambiarEstado(EmpleadoActual empleado, @PathVariable @Positive long idCategoria,
                               @Valid @RequestBody EstadoRequest req) {
         servicio.cambiarEstadoCategoria(empleado, idCategoria, req.activo());
     }

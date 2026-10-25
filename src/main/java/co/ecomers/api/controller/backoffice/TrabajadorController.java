@@ -18,6 +18,8 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
+import jakarta.validation.constraints.Positive;
+import jakarta.validation.constraints.Pattern;
 
 /** Trabajadores y sus permisos. Solo el rol ADMIN (lo exige {@code SecurityConfig} y lo vuelve a verificar la base). */
 @RestController
@@ -43,19 +45,19 @@ public class TrabajadorController {
 
     @PutMapping("/{idEmpleado}/estado")
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void cambiarEstado(EmpleadoActual admin, @PathVariable long idEmpleado, @Valid @RequestBody EstadoRequest req) {
+    public void cambiarEstado(EmpleadoActual admin, @PathVariable @Positive long idEmpleado, @Valid @RequestBody EstadoRequest req) {
         servicio.cambiarEstado(admin, idEmpleado, req.activo());
     }
 
     @PutMapping("/{idEmpleado}/permisos/{codigo}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void asignarPermiso(EmpleadoActual admin, @PathVariable long idEmpleado, @PathVariable String codigo) {
+    public void asignarPermiso(EmpleadoActual admin, @PathVariable @Positive long idEmpleado, @PathVariable @Pattern(regexp = "[A-Z_]{3,30}") String codigo) {
         servicio.asignarPermiso(admin, idEmpleado, codigo);
     }
 
     @DeleteMapping("/{idEmpleado}/permisos/{codigo}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void quitarPermiso(EmpleadoActual admin, @PathVariable long idEmpleado, @PathVariable String codigo) {
+    public void quitarPermiso(EmpleadoActual admin, @PathVariable @Positive long idEmpleado, @PathVariable @Pattern(regexp = "[A-Z_]{3,30}") String codigo) {
         servicio.quitarPermiso(admin, idEmpleado, codigo);
     }
 }
