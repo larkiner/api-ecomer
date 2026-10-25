@@ -4,7 +4,7 @@
 # usan la base simulada) y empaqueta el jar ejecutable.
 # Las pruebas contra Oracle (./gradlew integrationTest) no corren aqui.
 # ============================================================
-FROM eclipse-temurin:21-jdk AS build
+FROM eclipse-temurin:25-jdk AS build
 WORKDIR /app
 
 # Primero el wrapper y los descriptores: las dependencias solo se
@@ -21,7 +21,7 @@ RUN ./gradlew --no-daemon build
 # Etapa 2 - RUNTIME
 # Solo el JRE y el jar, con usuario sin privilegios.
 # ============================================================
-FROM eclipse-temurin:21-jre AS runtime
+FROM eclipse-temurin:25-jre AS runtime
 WORKDIR /app
 
 RUN groupadd --system spring && useradd --system --gid spring spring
