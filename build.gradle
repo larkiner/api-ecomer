@@ -48,7 +48,7 @@ dependencies {
 	testImplementation 'org.springframework.boot:spring-boot-starter-webmvc-test'
 	testImplementation 'org.springframework.boot:spring-boot-starter-security-test'
 	testImplementation 'com.tngtech.archunit:archunit-junit5:1.5.1'
-	testImplementation 'com.icegreen:greenmail-junit5:2.1.14'
+	testImplementation 'com.icegreen:greenmail-junit5:2.1.15'
 	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
